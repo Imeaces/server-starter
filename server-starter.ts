@@ -344,6 +344,9 @@ class ServerInstance {
         });
         return true;
     }
+    async forceStop(): Promise<boolean> {
+        return this.stop(true);
+    }
 
     sendCommand(cmd: string): boolean {
         if (this.config.stdin !== "use") {
@@ -444,13 +447,14 @@ class ServerInstance {
                     () => reject("spawn timeout"),
                     3 * 1000
                 );
+                const oneTimeErrorListener = (err: any) => {
+                    reject(err);
+                };
+                const errorListener = server.serverProcess.once("error", oneTimeErrorListener);
                 server.serverProcess.once("spawn", () => {
                     clearTimeout(timeout);
-                    server.serverProcess.off("error", errorListener);
+                    server.serverProcess.off("error", oneTimeErrorListener);
                     resolve();
-                });
-                const errorListener = server.serverProcess.once("error", (err) => {
-                    reject(err);
                 });
             });
             server.serverProcess.on("error", (err) => {
@@ -596,7 +600,7 @@ class Server {
             }
         }
     }
-    #timeoutIdCrashRestart: NodeJS.TimeoutID | null = null;
+    #timeoutIdCrashRestart: NodeJS.Timeout | null = null;
     /**
      * 关闭服务器
      */
@@ -659,7 +663,7 @@ class Main {
     ListSchedules = new Set<ScheduledTask>();
     async initStart(){
         await this.reload(configFile);
-        for (const a of autoStarts){
+        for (const a of this.autoStarts){
             await this.startServer(a);
         }
     }
@@ -769,18 +773,18 @@ class Main {
                 stdout: "pass",
             });
             const cmdServerConfig = ServerInstanceConfig.getConfig(cmdServerConfigId) as ServerInstanceConfig;
-            const serverProcess = child_process.spawn(task.value, {
+            const serverProcess = child_process.spawn(task.value, [], {
                 cwd: task.cwd ?? baseDir,
                 timeout: task.timeout,
-                stdio: ["use", "inherit", "inherit"],
+                stdio: ["pipe", "inherit", "inherit"],
             });
             await new Promise<void>((resolve, reject) => {
                 serverProcess.on("error", (err) => {
                     reject(err);
-                    serverInstance.forceStop();
+                    serverInstance?.forceStop();
                 });
                 serverProcess.on("spawn", () => {
-                    log4js.getLogger(serverInstance.name).info("进程已启动");
+                    serverInstance?.logger.info("进程已启动");
                 });
                 serverProcess.on('exit', () => {
                     resolve();
@@ -788,7 +792,7 @@ class Main {
                     ServerInstanceConfig.removeNamedConfig(cmdServerConfigName);
                 });
             });
-            const serverInstance = ServerInstance.asServerInstance(cmdServerConfigName, cmdServerConfig, serverProcess);
+            const serverInstance = await ServerInstance.asServerInstance(cmdServerConfigName, cmdServerConfig, serverProcess);
         } else if (task.action === "server-start") {
             this.startServer(task.value);
         } else if (task.action === "server-stop") {

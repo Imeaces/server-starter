@@ -740,7 +740,7 @@ class Main {
         if (!serverInstanceConfig.isMultiple) {
             throw new TypeError(`Server ${name} is not a multiple server`);
         }
-        const serverCopy = new Server(Object.assign({}, serverConfig, { instanceConfig });
+        const serverCopy = new Server(Object.assign({}, serverConfig, { instanceConfig }));
 
         this.RecordServers.set(serverCopy.name, serverCopy);
         if (this.ListLoadedServers.has(server)){

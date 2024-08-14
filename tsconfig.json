@@ -1,0 +1,25 @@
+{
+    "compilerOptions": {
+        "outDir": ".",
+        "target": "ES2023",
+        "baseUrl": ".",
+        "module": "node16",
+        "esModuleInterop": true,
+        "allowUnreachableCode": true,
+        "allowUnusedLabels": true,
+        "alwaysStrict": true,
+        "noImplicitAny": true,
+        
+        "strict": false,
+        "strictPropertyInitialization": false,
+        "strictBindCallApply": true,
+        "strictFunctionTypes": true,
+        "strictNullChecks": true,
+    },
+    "include": [
+        "**/*.ts"
+    ],
+    "exclude": [
+        "node_modules"
+    ]
+}

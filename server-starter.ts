@@ -446,8 +446,15 @@ class ServerInstance {
                 );
                 server.serverProcess.once("spawn", () => {
                     clearTimeout(timeout);
+                    server.serverProcess.off("error", errorListener);
                     resolve();
                 });
+                const errorListener = server.serverProcess.once("error", (err) => {
+                    reject(err);
+                });
+            });
+            server.serverProcess.on("error", (err) => {
+                log4js.getLogger(name).error(err);
             });
         } catch (e) {
             log4js.getLogger(name).error("启动服务器进程失败:", e);
@@ -506,8 +513,8 @@ class Server {
         this.#config = config;
         this.#logger = log4js.getLogger(this.name);
     }
-    #restartLock = new Lock();
-    #restartTimeLimit = new RestartLimit({maxTimes:5,interval:10 * 60 * 1000});
+    #restartLock = new Lock(true);
+    #crashRestartTimeLimit = new RestartLimit({maxTimes:5,interval:10 * 60 * 1000});
     #isActive: boolean = false;
 
     /**
@@ -548,30 +555,68 @@ class Server {
         }
         const processName = String(instance.serverProcess.pid ?? "");
         this.#logger.info("服务器进程%s已退出，%s：%s", processName, code == null ? "信号" : "状态", code ?? signal);
-        if (this.#instance == null && this.config.autoRestart) {
-            const unlock = await this.#restartLock.lock();
-            this.#logger.warn("服务器异常退出，尝试重新启动");
-            await this._startProcess();
-            unlock();
+        if (this.config.autoRestart){
+            this.#doAutoRestart();
+        } else {
+            this.#isActive = false;
         }
+    }
+    async #doAutoRestart(unlock?: () => void){
+        if (this.#instance != null || !this.config.autoRestart) {
+            return;
+        }
+        if (unlock == undefined){
+            unlock = await this.#restartLock.lock();
+        }
+        if (this.#crashRestartTimeLimit.exceed()){
+            this.#logger.warn("服务器崩溃自动重启的次数过多，稍后再尝试重新启动");
+            this.#timeoutIdCrashRestart = setTimeout(() => {
+                this.#doAutoRestart(unlock);
+            }, this.#crashRestartTimeLimit.interval);
+            return;
+        }
+        this.#logger.warn("服务器异常退出，尝试重新启动");
+        await this._startProcess();
+        unlock();
     }
     /**
      * 启动服务器
      */
     async start() {
-        this.#restartTimeLimit.exceed();
+        this.#isActive = true;
         const unlock = await this.#restartLock.lock();
         this.updateInstanceConfig();
-        await this._startProcess();
+        const isSucceed = await this._startProcess();
         unlock();
+        if (!isSucceed){
+            if (this.config.autoRestart){
+                this.#doAutoRestart();
+            } else {
+                this.#isActive = false;
+            }
+        }
     }
+    #timeoutIdCrashRestart: NodeJS.TimeoutID | null = null;
     /**
      * 关闭服务器
      */
     async stop(forceStop = false) {
+        if (forceStop){
+            if (this.#timeoutIdCrashRestart != null){
+                clearTimeout(this.#timeoutIdCrashRestart);
+                this.#timeoutIdCrashRestart = null;
+            }
+            this.#restartLock.unlock();
+        }
         const unlock = await this.#restartLock.lock();
         await this._stopProcess(forceStop);
         unlock();
+        if (forceStop){
+            this.#isActive = false;
+        }
+    }
+    async forceStop(){
+        return this.stop(true);
     }
     /**
      * 运行新的服务器进程
@@ -609,8 +654,15 @@ class Server {
 }
 
 class Main {
+    ListLoadedServers = new Set<Server>();
     RecordServers = new Map<string, Server>();
     ListSchedules = new Set<ScheduledTask>();
+    async initStart(){
+        await this.reload(configFile);
+        for (const a of autoStarts){
+            await this.startServer(a);
+        }
+    }
     //TODO: 添加配置文件检查
     async reload(file: string): Promise<boolean> {
         const starterConfig = await readConfigFile(file);
@@ -630,21 +682,29 @@ class Main {
                     autoRestart: false,
                     name: config.name,
                 });
+
                 this.RecordServers.set(server.name, server);
+                this.ListLoadedServers.add(server);
             }
         }
-        for (const entry of this.RecordServers) {
-            const [name, server] = entry;
+        for (const [name, server] of this.RecordServers) {
             // 为了兼容多服务器的情况（isMultiple），应该读取server.config.name，而不是server.name
             const loadedServerConfig = ServerInstanceConfig.getNamedConfig(server.config.name);
             // 服务器配置被删除，所以同步移除服务器
             if (loadedServerConfig == undefined) {
-                this.RecordServers.delete(name);
+
+                this.ListLoadedServers.delete(server);
+
                 continue;
             }
             server.updateInstanceConfig(loadedServerConfig);
         }
-        for (const server of this.RecordServers.values()) {
+        for (const [name, server] of this.RecordServers) {
+
+            if (!(this.ListLoadedServers.has(server)) && !server.isActive()){
+                this.RecordServers.delete(name);
+            }
+
             if (starterConfig.autoRestarts?.includes(server.config.name)) {
                 server.config.autoRestart = true;
             } else {
@@ -675,13 +735,18 @@ class Main {
         if (server == undefined) {
             throw new TypeError(`Server ${name} not found`);
         }
-        const { config: serverConfig } = server;
+        const { latestInstanceConfig: instanceConfig, config: serverConfig } = server;
         const serverInstanceConfig = server.latestInstanceConfig;
         if (!serverInstanceConfig.isMultiple) {
             throw new TypeError(`Server ${name} is not a multiple server`);
         }
-        const serverCopy = new Server(serverConfig);
+        const serverCopy = new Server(Object.assign({}, serverConfig, { instanceConfig });
+
         this.RecordServers.set(serverCopy.name, serverCopy);
+        if (this.ListLoadedServers.has(server)){
+            this.ListLoadedServers.add(serverCopy);
+        }
+
         return serverCopy;
     }
     autoStarts: string[] = [];
@@ -699,26 +764,31 @@ class Main {
             const cmdServerConfigName = `schedule$${createID(6)}`;
             const cmdServerConfigId = ServerInstanceConfig.addServerConfig(cmdServerConfigName, {
                 params: [],
-                stopCommand: [{ type: "mixed" }]
+                stopCommand: [{ type: "mixed" }],
+                stdin: "use",
+                stdout: "pass",
             });
             const cmdServerConfig = ServerInstanceConfig.getConfig(cmdServerConfigId) as ServerInstanceConfig;
             const serverProcess = child_process.spawn(task.value, {
                 cwd: task.cwd ?? baseDir,
-                timeout: task.timeout
+                timeout: task.timeout,
+                stdio: ["use", "inherit", "inherit"],
             });
             await new Promise<void>((resolve, reject) => {
                 serverProcess.on("error", (err) => {
                     reject(err);
+                    serverInstance.forceStop();
                 });
                 serverProcess.on("spawn", () => {
-                    resolve();
+                    log4js.getLogger(serverInstance.name).info("进程已启动");
                 });
                 serverProcess.on('exit', () => {
+                    resolve();
                     ServerInstanceConfig.removeConfig(cmdServerConfigId);
                     ServerInstanceConfig.removeNamedConfig(cmdServerConfigName);
                 });
             });
-            ServerInstance.asServerInstance(cmdServerConfigName, cmdServerConfig, serverProcess);
+            const serverInstance = ServerInstance.asServerInstance(cmdServerConfigName, cmdServerConfig, serverProcess);
         } else if (task.action === "server-start") {
             this.startServer(task.value);
         } else if (task.action === "server-stop") {
@@ -790,7 +860,7 @@ class Main {
         const allServers: Server[] = [];
         if (serverConfig != undefined) {
             for (const server of this.RecordServers.values()) {
-                if (server.config.name == serverName) {
+                if (server.config.name === serverName) {
                     allServers.push(server);
                 }
             }
@@ -819,11 +889,10 @@ class Main {
         if (!serverConfig.isMultiple) {
             if (allServers.length > 1) {
                 LOGGER.error("指定的服务器未启用多实例，但是找到了多条服务器信息：%s", serverName);
-                return;
             } else if (allServers.length === 1) {
                 await allServers[0].start();
             } else {
-                throw new Error("服务器配置未初始化: " + serverName);
+                LOGGER.error("服务器配置未初始化: " + serverName);
             }
             return;
         }
@@ -881,12 +950,16 @@ class RestartLimit {
 }
 
 class Lock {
+    #unlock: null | (() => void);
     #unlockable: boolean;
     constructor(unlockable = false) {
         this.#unlockable = unlockable;
     }
     unlock(): void {
-        throw new ReferenceError("cannot unlock a non-unlockable lock");
+        if (!this.#unlockable){
+            throw new ReferenceError("cannot unlock a non-unlockable lock");
+        }
+        this.#unlock?.();
     }
     /**
      * 尝试锁定
@@ -920,7 +993,7 @@ class Lock {
 
         this.#isLocked = true;
         let isUnlocked = false;
-        return () => {
+        const unlock = () => {
             if (isUnlocked) {
                 return false;
             }
@@ -931,7 +1004,9 @@ class Lock {
                 setImmediate(nextLock);
             }
             return true;
-        }
+        };
+        this.#unlock = unlock;
+        return unlock;
     }
     #isLocked = false;
     #handles: (() => void)[] = [];

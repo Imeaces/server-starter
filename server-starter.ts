@@ -1,16 +1,54 @@
 #!/usr/bin/env node
 
 import yaml, { Type } from "js-yaml";
-import lodash, { isEqual } from "lodash";
+import lodash from "lodash";
 import log4js, { Logger } from "log4js";
 import cron, { ScheduledTask } from "node-cron";
 import child_process, { IOType } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
+import { EOL } from "node:os";
 
 const LOGGER = log4js.getLogger("server-starter");
 
+log4js.configure({
+    appenders: {
+        stdout: { type: "stdout" },
+        stderr: { type: "stderr" },
+        logfile: {
+            type: "file",
+            filename: "starterLogs/latest.log",
+            maxLogSize: 32768,
+            backups: 200,
+            compress: true
+        },
+        defaultOut: {
+            type: "logLevelFilter",
+            level: "debug",
+            appender: "stdout",
+            maxLevel: "warn"
+        },
+        defaultErr: {
+            type: "logLevelFilter",
+            level: "error",
+            appender: "stderr"
+        },
+        noLog: {
+            type: "noLogFilter"
+        }
+    },
+    categories: {
+        default: {
+            appenders: ["defaultOut", "defaultErr", "logfile"],
+            level: "trace"
+        },
+        noLog: {
+            level: "off",
+            appenders: ["noLog"],
+        }
+    }
+});
 let configFile = "server-starter.yml";
 let baseDir = ".";
 
@@ -39,6 +77,8 @@ function main() {
             throw new Error();
         }
     }
+    LOGGER.info("正在启动程序，baseDir: %s，configFile：%s", baseDir, configFile);
+    new Main().startScript();
 }
 
 /**
@@ -58,27 +98,28 @@ type ServerConfigID = ID;
  */
 type ServerRunID = ID;
 
-type StarterSchedule = { cron: string } & (StarterSignalServerSchedule | StarterStartServerSchedule | StarterStopServerSchedule | StarterRestartServerSchedule | StarterCmdSchedule);
-type StarterCmdSchedule = {
+type StarterSchedule = { cron: string } & StarterAction;
+type StarterAction = StarterSignalServerAction | StarterStartServerAction | StarterStopServerAction | StarterRestartServerAction | StarterCmdAction;
+type StarterCmdAction = {
     action: "cmd"
     value: string
     timeout?: number
     cwd?: string
 };
-type StarterRestartServerSchedule = {
+type StarterRestartServerAction = {
     action: "server-restart"
     value: string
 }
-type StarterStartServerSchedule = {
+type StarterStartServerAction = {
     action: "server-start"
     value: string
 }
-type StarterStopServerSchedule = {
+type StarterStopServerAction = {
     action: "server-stop"
     value: string
-    isMultiple?: boolean
+    forceStop?: boolean
 }
-type StarterSignalServerSchedule = {
+type StarterSignalServerAction = {
     action: "server-kill"
     value: string
     signal: NodeJS.Signals | number
@@ -106,7 +147,7 @@ async function readConfigFile(file: string = configFile): Promise<ServerStarterC
     try {
         const data = await fs.readFile(file, "utf8");
         const config = yaml.load(file) as any;
-        const { schedules, servers, autoStarts,autoRestarts, shell } = config;
+        const { schedules, servers, autoStarts, autoRestarts, shell } = config;
         return { schedules, servers, autoStarts, autoRestarts, shell };
     } catch (e) {
         LOGGER.error("无法加载配置：", e);
@@ -118,6 +159,27 @@ function timeWait(timeoutMs: number) {
     return new Promise<void>(resolve => {
         setTimeout(() => resolve(), timeoutMs);
     });
+}
+
+let _uptime = 0;
+const _startUptime = Date.now();
+
+cron.schedule("* * * * * *", () => {
+    _uptime += 1;
+}, {
+    "recoverMissedExecutions": true,
+    "scheduled": true,
+})
+function getUptimeText() {
+    const days = Math.floor(_uptime / (60 * 60 * 24));
+    const hours = Math.floor(_uptime / (60 * 60) % 24 );
+    const minutes = Math.floor(_uptime / 60 % 60);
+    const seconds = Math.floor(_uptime % 60);
+
+    const currentTimeDate = new Date();
+    const currentTimeText = `${currentTimeDate.getHours()}:${currentTimeDate.getMinutes()}:${currentTimeDate.getSeconds()}`;
+
+    return `${days} days, ${hours}:${minutes}:${seconds} (当前时间：${currentTimeText})`;
 }
 
 function createID(length: number = 8): ID {
@@ -200,7 +262,7 @@ class ServerInstanceConfig {
             const { name, cwd, params, isMultiple, stdout, stdin, execOption, stopCommand } = o;
             yourConfig = { name, cwd, params, isMultiple, stdout, stdin, execOption, stopCommand, };
         }
-        return isEqual(myConfig, yourConfig);
+        return lodash.isEqual(myConfig, yourConfig);
     }
     static addServerConfig(name: string, data: StarterServerConfig): ServerConfigID {
         const id = createID();
@@ -518,7 +580,7 @@ class Server {
         this.#logger = log4js.getLogger(this.name);
     }
     #restartLock = new Lock(true);
-    #crashRestartTimeLimit = new RestartLimit({maxTimes:5,interval:10 * 60 * 1000});
+    #crashRestartTimeLimit = new RestartLimit({ maxTimes: 5, interval: 10 * 60 * 1000 });
     #isActive: boolean = false;
 
     /**
@@ -559,20 +621,20 @@ class Server {
         }
         const processName = String(instance.serverProcess.pid ?? "");
         this.#logger.info("服务器进程%s已退出，%s：%s", processName, code == null ? "信号" : "状态", code ?? signal);
-        if (this.config.autoRestart){
+        if (this.config.autoRestart) {
             this.#doAutoRestart();
         } else {
             this.#isActive = false;
         }
     }
-    async #doAutoRestart(unlock?: () => void){
+    async #doAutoRestart(unlock?: () => void) {
         if (this.#instance != null || !this.config.autoRestart) {
             return;
         }
-        if (unlock == undefined){
+        if (unlock == undefined) {
             unlock = await this.#restartLock.lock();
         }
-        if (this.#crashRestartTimeLimit.exceed()){
+        if (this.#crashRestartTimeLimit.exceed()) {
             this.#logger.warn("服务器崩溃自动重启的次数过多，稍后再尝试重新启动");
             this.#timeoutIdCrashRestart = setTimeout(() => {
                 this.#doAutoRestart(unlock);
@@ -592,8 +654,8 @@ class Server {
         this.updateInstanceConfig();
         const isSucceed = await this._startProcess();
         unlock();
-        if (!isSucceed){
-            if (this.config.autoRestart){
+        if (!isSucceed) {
+            if (this.config.autoRestart) {
                 this.#doAutoRestart();
             } else {
                 this.#isActive = false;
@@ -605,8 +667,8 @@ class Server {
      * 关闭服务器
      */
     async stop(forceStop = false) {
-        if (forceStop){
-            if (this.#timeoutIdCrashRestart != null){
+        if (forceStop) {
+            if (this.#timeoutIdCrashRestart != null) {
                 clearTimeout(this.#timeoutIdCrashRestart);
                 this.#timeoutIdCrashRestart = null;
             }
@@ -615,11 +677,11 @@ class Server {
         const unlock = await this.#restartLock.lock();
         await this._stopProcess(forceStop);
         unlock();
-        if (forceStop){
+        if (forceStop) {
             this.#isActive = false;
         }
     }
-    async forceStop(){
+    async forceStop() {
         return this.stop(true);
     }
     /**
@@ -657,18 +719,98 @@ class Server {
     }
 }
 
+const Commands: Record<string, (args: string[], raw: string) => void> = {
+    "+start": (args, raw) => {
+        Main.Instance.execAction({
+            action: "server-start",
+            value: raw
+        });
+    },
+    "+stop": (args, raw) => {
+        let serverName: string;
+        let forceStop: boolean = false;
+        if (raw.lastIndexOf("false") + "false".length === raw.length) {
+            forceStop = false;
+            serverName = raw.substring(0, raw.lastIndexOf("false"));
+        } else if (raw.lastIndexOf("true") + "true".length === raw.length) {
+            forceStop = true;
+            serverName = raw.substring(0, raw.lastIndexOf("true"));
+        } else {
+            serverName = raw;
+        }
+        Main.Instance.execAction({
+            action: "server-stop",
+            value: serverName,
+            forceStop: forceStop
+        });
+    },
+    "+restart": (args, raw) => {
+        Main.Instance.execAction({
+            action: "server-restart",
+            value: raw
+        });
+    },
+    "+reload": () => {
+        Main.Instance.reload();
+    },
+    "+ps": () => {
+        const allServers = [...Main.Instance.RecordServers.values()];
+        console.log("已经加载了下列服务：", allServers.map(server => server.name).join(" "));
+        console.log("正在运行下列服务：", allServers.filter(server => server.isRunning()).map(server => server.name).join(" "));
+    },
+    "+status": () => {
+        const allServers = [...Main.Instance.RecordServers.values()];
+        const runningServers = allServers.filter(server => server.isRunning());
+        const activeServers = allServers.filter(server => server.isActive());
+        const inactiveServers = allServers.filter(server => !server.isActive());
+        const outdateServers = allServers.filter(server => !server.latestInstanceConfig.equals(server.config));
+
+        const serverListTextLines = ["Server Status Config"];
+        for (const server of allServers.toSorted((a, b) => a.name < b.name ? 1 : a.name === b.name ? 0 : -1)) {
+            const status = server.isRunning() ? "running" : server.isActive() ? "active" : "stopped";
+            const configStatus = server.config.instanceConfig.equals(server.latestInstanceConfig) ? "normal" : "outdated";
+            serverListTextLines.push(`${server.name} ${status} ${configStatus}`);
+        }
+
+        console.log("当前状态：已运行%s，加载了%s个配置，已添加%s个计划任务"
+            + EOL + "服务列表如下："
+            + EOL + "%s"
+            + EOL + "",
+            getUptimeText(),
+            ServerInstanceConfig.RecordServerConfig.size,
+            Main.Instance.ListSchedules.size,
+            serverListTextLines.join(EOL)
+        );
+    },
+};
+
 class Main {
+    static Instance: Main = null as any;
     ListLoadedServers = new Set<Server>();
     RecordServers = new Map<string, Server>();
     ListSchedules = new Set<ScheduledTask>();
-    async initStart(){
+    #readline: readline.ReadLine;
+    nextCommand(cmd: string) {
+        
+    }
+    async startScript() {
+        this.#readline = readline.createInterface({
+            input: process.stdin,
+            output: process.stderr,
+        });
+        this.#readline.on("line", this.nextCommand.bind(this));
+
         await this.reload(configFile);
-        for (const a of this.autoStarts){
+        if (this.autoStarts.length === 0) {
+            LOGGER.info("没有需要自启动的服务器");
+        }
+        for (const a of this.autoStarts) {
             await this.startServer(a);
         }
     }
     //TODO: 添加配置文件检查
-    async reload(file: string): Promise<boolean> {
+    async reload(file: string = configFile): Promise<boolean> {
+        LOGGER.info("正在加载配置文件 %s", file);
         const starterConfig = await readConfigFile(file);
         if (starterConfig == null) {
             LOGGER.error("cannot reload the config file");
@@ -705,7 +847,7 @@ class Main {
         }
         for (const [name, server] of this.RecordServers) {
 
-            if (!(this.ListLoadedServers.has(server)) && !server.isActive()){
+            if (!(this.ListLoadedServers.has(server)) && !server.isActive()) {
                 this.RecordServers.delete(name);
             }
 
@@ -747,7 +889,7 @@ class Main {
         const serverCopy = new Server(Object.assign({}, serverConfig, { instanceConfig }));
 
         this.RecordServers.set(serverCopy.name, serverCopy);
-        if (this.ListLoadedServers.has(server)){
+        if (this.ListLoadedServers.has(server)) {
             this.ListLoadedServers.add(serverCopy);
         }
 
@@ -758,13 +900,21 @@ class Main {
     async runSchedule(task: StarterSchedule) {
         LOGGER.debug("正在运行任务：%s", JSON.stringify(task));
         try {
-            await this.#runSchedule(task);
+            await this.#execAction(task);
         } catch (e) {
             LOGGER.error("在执行计划任务时出现错误：", e);
         }
     }
-    async #runSchedule(task: StarterSchedule) {
-        if (task.action === "cmd") {
+    async execAction(action: StarterAction) {
+        LOGGER.trace("执行操作：%s", JSON.stringify(action));
+        try {
+            await this.execAction(action);
+        } catch (e) {
+            LOGGER.error("在执行操作时出现错误：%s", JSON.stringify(action), e);
+        }
+    }
+    async #execAction(action: StarterAction) {
+        if (action.action === "cmd") {
             const cmdServerConfigName = `schedule$${createID(6)}`;
             const cmdServerConfigId = ServerInstanceConfig.addServerConfig(cmdServerConfigName, {
                 params: [],
@@ -773,9 +923,9 @@ class Main {
                 stdout: "pass",
             });
             const cmdServerConfig = ServerInstanceConfig.getConfig(cmdServerConfigId) as ServerInstanceConfig;
-            const serverProcess = child_process.spawn(task.value, [], {
-                cwd: task.cwd ?? baseDir,
-                timeout: task.timeout,
+            const serverProcess = child_process.spawn(action.value, [], {
+                cwd: action.cwd ?? baseDir,
+                timeout: action.timeout,
                 stdio: ["pipe", "inherit", "inherit"],
             });
             await new Promise<void>((resolve, reject) => {
@@ -793,14 +943,14 @@ class Main {
                 });
             });
             const serverInstance = await ServerInstance.asServerInstance(cmdServerConfigName, cmdServerConfig, serverProcess);
-        } else if (task.action === "server-start") {
-            this.startServer(task.value);
-        } else if (task.action === "server-stop") {
-            this.stopServer(task.value);
-        } else if (task.action === "server-restart") {
-            this.restartServer(task.value);
-        } else if (task.action === "server-kill") {
-            this.sendSignalToServer(task.value, task.signal);
+        } else if (action.action === "server-start") {
+            this.startServer(action.value);
+        } else if (action.action === "server-stop") {
+            this.stopServer(action.value, action.forceStop);
+        } else if (action.action === "server-restart") {
+            this.restartServer(action.value);
+        } else if (action.action === "server-kill") {
+            this.sendSignalToServer(action.value, action.signal);
         }
     }
     async sendSignalToServer(serverName: string, signal: NodeJS.Signals | number) {
@@ -829,7 +979,7 @@ class Main {
             }
         }
     }
-    async stopServer(serverName: string) {
+    async stopServer(serverName: string, force: boolean = false) {
         let serverConfig: ServerInstanceConfig | undefined = ServerInstanceConfig.getNamedConfig(serverName);
         const allServers: Server[] = [];
         if (serverConfig != undefined) {
@@ -851,7 +1001,7 @@ class Main {
         }
 
         for (const server of allServers) {
-            await server.stop();
+            await server.stop(force);
         }
         if (allServers.length > 1 && serverConfig.isMultiple) {
             for (const server of allServers.slice(1)) {
@@ -910,6 +1060,8 @@ class Main {
     }
 }
 
+Main.Instance = new Main();
+
 class RestartLimit {
     record: number[] = [];
     maxTimes = 3;
@@ -943,7 +1095,7 @@ class RestartLimit {
                 break;
             }
         }
-      
+
         if (cutIndex !== 0) {
             record = record.slice(cutIndex);
             this.record = record;
@@ -960,7 +1112,7 @@ class Lock {
         this.#unlockable = unlockable;
     }
     unlock(): void {
-        if (!this.#unlockable){
+        if (!this.#unlockable) {
             throw new ReferenceError("cannot unlock a non-unlockable lock");
         }
         this.#unlock?.();

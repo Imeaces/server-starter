@@ -9,6 +9,7 @@
         "allowUnusedLabels": true,
         "alwaysStrict": true,
         "noImplicitAny": true,
+        "inlineSourceMap": true,
         
         "strict": false,
         "strictPropertyInitialization": false,

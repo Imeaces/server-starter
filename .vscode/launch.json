@@ -1,0 +1,18 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Launch Program",
+      "skipFiles": ["<node_internals>/**"],
+      "runtimeArgs": [
+        "--loader", "ts-node/esm" // 使用 ts-node 的 ESM 支持
+      ],
+      "program": "${workspaceFolder}/server-starter.ts", // 入口文件路径
+      "cwd": "${workspaceFolder}",
+      "sourceMaps": true, // 启用 source maps
+      "console": "integratedTerminal"
+    }
+  ]
+}

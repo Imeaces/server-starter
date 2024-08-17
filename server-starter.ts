@@ -262,7 +262,7 @@ async function readConfigFile(file: string = configFile): Promise<ServerStarterE
                 if (typeof cwd !== "string" && cwd != undefined) {
                     throw `servers[${name}].cwd must be string`;
                 }
-                if (!Array.isArray(typeof params) && typeof params !== "string") {
+                if (!Array.isArray(params) && typeof params !== "string") {
                     throw `servers[${name}].params must be string or array`;
                 }
                 if (typeof isMultiple !== "boolean" && isMultiple != undefined) {
@@ -402,7 +402,6 @@ class ServerInstanceConfig {
         return this.#execOption;
     }
     get isMultiple() {
-        return false;
         return this.#isMultiple;
     }
     get stdout() {

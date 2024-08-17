@@ -10,6 +10,7 @@
         "--loader", "ts-node/esm" // 使用 ts-node 的 ESM 支持
       ],
       "program": "${workspaceFolder}/server-starter.ts", // 入口文件路径
+      "args": ["--debug"],
       "cwd": "${workspaceFolder}",
       "sourceMaps": true, // 启用 source maps
       "console": "integratedTerminal"

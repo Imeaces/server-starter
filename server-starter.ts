@@ -18,8 +18,8 @@ process.on("exit", () => {
 
 const LOGGER = log4js.getLogger("server-starter");
 const DEBUG = log4js.getLogger("server-starter-debug");
-LOGGER.level = "info";
-DEBUG.level = "trace";
+LOGGER.level = log4js.levels.INFO;
+DEBUG.level = log4js.levels.OFF;
 
 log4js.configure({
     appenders: {
@@ -80,6 +80,10 @@ function main() {
                 process.exit(2);
                 throw new Error();
             }
+        } else if (arg === "--debug" || arg === "-v") {
+            console.info("[server-starter] 启用详细日志")
+            LOGGER.level = log4js.levels.TRACE;
+            DEBUG.level = log4js.levels.TRACE;
         } else {
             console.error("unknown arg: %s", arg);
             process.exit(2);

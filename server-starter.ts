@@ -10,7 +10,16 @@ import path from "node:path";
 import readline from "node:readline";
 import { EOL } from "node:os";
 
+process.on("exit", () => {
+    DEBUG.debug("ServerInstance", ServerInstance);
+    DEBUG.debug("ServerInstanceConfig", ServerInstanceConfig);
+    DEBUG.debug("Main", Main.Instance);
+});
+
 const LOGGER = log4js.getLogger("server-starter");
+const DEBUG = log4js.getLogger("server-starter-debug");
+LOGGER.level = "info";
+DEBUG.level = "trace";
 
 log4js.configure({
     appenders: {
@@ -25,7 +34,7 @@ log4js.configure({
         },
         defaultOut: {
             type: "logLevelFilter",
-            level: "debug",
+            level: "trace",
             appender: "stdout",
             maxLevel: "warn"
         },
@@ -77,8 +86,8 @@ function main() {
             throw new Error();
         }
     }
-    LOGGER.info("正在启动程序，baseDir: %s，configFile：%s", baseDir, configFile);
-    new Main().startScript();
+    LOGGER.info("baseDir: %s，configFile：%s", baseDir, configFile);
+    Main.Instance.startScript();
 }
 
 /**
@@ -99,7 +108,18 @@ type ServerConfigID = ID;
 type ServerRunID = ID;
 
 type StarterSchedule = { cron: string } & StarterAction;
-type StarterAction = StarterSignalServerAction | StarterStartServerAction | StarterStopServerAction | StarterRestartServerAction | StarterCmdAction;
+type StarterAction = { action: string, value: any } & (
+    StarterStopAllServerAction
+    | StarterSignalServerAction
+    | StarterStartServerAction
+    | StarterStopServerAction
+    | StarterRestartServerAction
+    | StarterCmdAction
+    | StarterStartAutoStartsServerAction
+    | StarterStopScriptAction
+    | StarterSendServerCommandAction
+);
+
 type StarterCmdAction = {
     action: "cmd"
     value: string
@@ -124,35 +144,168 @@ type StarterSignalServerAction = {
     value: string
     signal: NodeJS.Signals | number
 }
+type StarterStopAllServerAction = {
+    action: "stop-all-server"
+}
+type StarterStartAutoStartsServerAction = {
+    action: "start-auto-starts-server"
+}
+type StarterStopScriptAction = {
+    action: "stop-script"
+}
+type StarterSendServerCommandAction = {
+    action: "send-server-command"
+    value: string
+    server: string
+    isMultiple?: boolean
+}
 
 type StarterServerConfig = {
     cwd?: string
     "exec-option"?: any
-    params: string[],
+    params: string | string[],
     isMultiple?: boolean
     stdout?: "use" | "pass" | "ignore"
     stdin?: "use" | "ignore"
     stopCommand?: ServerInstanceConfigStopCommand[]
 };
 
+type StarterServerExactConfig = {
+    cwd: string
+    "exec-option": any
+    params: string[],
+    isMultiple: boolean
+    stdout: "use" | "pass" | "ignore"
+    stdin: "use" | "ignore"
+    stopCommand: ServerInstanceConfigStopCommand[]
+};
+
 type ServerStarterConfig = {
-    schedules: StarterSchedule[];
-    servers: Record<string, StarterServerConfig>;
+    schedules?: StarterSchedule[];
+    servers?: Record<string, StarterServerConfig>;
     autoStarts?: string[];
     autoRestarts?: string[];
     shell?: string | string[]
+    commands?: Record<string, StarterAction>
 };
 
-async function readConfigFile(file: string = configFile): Promise<ServerStarterConfig | null> {
+type ServerStarterExactConfig = {
+    schedules: StarterSchedule[];
+    servers: Record<string, StarterServerExactConfig>;
+    autoStarts: string[];
+    autoRestarts: string[];
+    shell?: string[]
+    commands: Record<string, StarterAction>
+};
+
+async function readConfigFile(file: string = configFile): Promise<ServerStarterExactConfig | null> {
+    const config: ServerStarterExactConfig = {
+        schedules: [],
+        servers: {},
+        autoStarts: [],
+        autoRestarts: [],
+        commands: {},
+        shell: [],
+    };
     try {
-        const data = await fs.readFile(file, "utf8");
-        const config = yaml.load(file) as any;
-        const { schedules, servers, autoStarts, autoRestarts, shell } = config;
-        return { schedules, servers, autoStarts, autoRestarts, shell };
+        const data = yaml.load(await fs.readFile(file, "utf8")) as any;
+        const { schedules, servers, autoStarts, autoRestarts, shell, commands } = data as ServerStarterConfig;
+
+        // verify autoStarts
+        if (autoStarts != undefined && !Array.isArray(autoStarts)) {
+            throw "autoStarts must be string[]";
+        }
+        config.autoRestarts = autoRestarts ?? [];
+
+        // verify autoRestarts
+        if (autoRestarts != undefined && !Array.isArray(autoRestarts)) {
+            throw "autoRestarts must be string[]";
+        }
+        config.autoStarts = autoRestarts ?? [];
+
+        //verify shell
+        if (shell != undefined && !(Array.isArray(shell) || typeof shell === "string")) {
+            throw "shell must be string or string[]";
+        }
+        config.shell = typeof shell === "string" ? [shell] : shell;
+
+        //verify schedules
+        if (schedules != undefined && !Array.isArray(schedules)) {
+            throw "schedules must be array";
+        }
+        schedules?.forEach((schedule, index) => {
+            const { cron, action, value } = schedule;
+            if (typeof cron !== "string") {
+                throw `schedules[${index}].cron is not string`;
+            }
+            if (typeof action !== "string") {
+                throw `schedules[${index}].action is not string`;
+            }
+        });
+        config.schedules = schedules ?? [];
+
+        // verify servers
+        if (servers != undefined)
+        Object.entries(servers).forEach(([name, serverInstanceConfig], index) => {
+            try {
+                if (name.length === 0) {
+                    throw `servers[${index}] has an invalid server name`;
+                }
+                if (typeof serverInstanceConfig !== "object" || serverInstanceConfig == null) {
+                    throw `servers[${name}] is not a valid config`;
+                }
+                const { cwd, "exec-option": execOption, params, isMultiple, stdout, stdin, stopCommand, } = serverInstanceConfig as StarterServerConfig;
+                if (typeof cwd !== "string" && cwd != undefined) {
+                    throw `servers[${name}].cwd must be string`;
+                }
+                if (!Array.isArray(typeof params) && typeof params !== "string") {
+                    throw `servers[${name}].params must be string or array`;
+                }
+                if (typeof isMultiple !== "boolean" && isMultiple != undefined) {
+                    throw `servers[${name}].isMultiple must be boolean`;
+                }
+                if (stdout != undefined && !["use", "pass", "ignore"].includes(stdout)) {
+                    throw `servers[${name}].stdout must be "use", "pass" or "ignore"`;
+                }
+                if (stdin != undefined && !["use", "ignore"].includes(stdin)) {
+                    throw  `servers[${name}].stdin must be "use" or "ignore"`;
+                }
+                if (stopCommand != undefined && !Array.isArray(stopCommand))
+                    throw `servers[${name}].stopCommand must be array`;
+                if (stopCommand != undefined)
+                stopCommand.forEach((stopCommandItem, index) => {
+                    if (!["mixed", "command", "signal", "kill"].includes(stopCommandItem.type)){
+                        throw `servers[$name}].stopCommand[${index}].type must be "mixed", "command", "signal" or "kill"`;
+                    }
+                    if (typeof stopCommandItem.value !== "string" && typeof stopCommandItem.value !== "number") {
+                        throw `servers[$name}].stopCommand[${index}].value must be string, number or NodeJS.Signals`;
+                    }
+                    if (stopCommandItem.timeoutMs != undefined && typeof stopCommandItem.timeoutMs !== "number") {
+                        throw `servers[$name}].stopCommand[${index}].timeoutMs must be number`;
+                    }
+                });
+                const serverConfig = {
+                    "exec-option": execOption,
+                    params: Array.isArray(params) ? params.map(p => String(p)) : [params],
+                    isMultiple: isMultiple ?? false,
+                    stdout: stdout ?? "pass",
+                    stdin: stdin ?? "use",
+                    stopCommand: stopCommand ?? [],
+                    cwd: cwd ?? baseDir,
+                };
+                config.servers[name] = serverConfig;
+            } catch (e) {
+                if (typeof e === "string") {
+                    LOGGER.error("服务器配置%s无效：%s", name, e);
+                } else {
+                    LOGGER.error("无法加载服务器配置%s：", name, serverInstanceConfig);
+                }
+            }
+        });
     } catch (e) {
-        LOGGER.error("无法加载配置：", e);
+        LOGGER.error("无法读取配置文件%s：", file, e);
     }
-    return null;
+    return config;
 }
 
 function timeWait(timeoutMs: number) {
@@ -180,6 +333,18 @@ function getUptimeText() {
     const currentTimeText = `${currentTimeDate.getHours()}:${currentTimeDate.getMinutes()}:${currentTimeDate.getSeconds()}`;
 
     return `${days} days, ${hours}:${minutes}:${seconds} (当前时间：${currentTimeText})`;
+}
+
+function firstArg(cmd: string){
+   const pattern = /^(?:\s*)?(?:(?:"(.*?)(?<!\\)")|(\S+))/;
+   const result = pattern.exec(cmd);
+   if (result != null){
+      return {
+         arg: result[1] ?? result[2],
+         subcommand: cmd.slice(result[0].length),
+      }
+   }
+   return null;
 }
 
 function createID(length: number = 8): ID {
@@ -264,15 +429,19 @@ class ServerInstanceConfig {
         }
         return lodash.isEqual(myConfig, yourConfig);
     }
-    static addServerConfig(name: string, data: StarterServerConfig): ServerConfigID {
+    static addServerConfig(name: string, data: StarterServerExactConfig): ServerConfigID {
         const id = createID();
         const config = new ServerInstanceConfig();
         config.#name = name;
-        config.#cwd = path.join(baseDir, data.cwd ?? ".");
+        if (path.isAbsolute(data.cwd)) {
+            config.#cwd = data.cwd;
+        } else {
+            config.#cwd = path.join(baseDir, data.cwd ?? ".");
+        }
         config.#params = data.params;
-        config.#isMultiple = data.isMultiple === true ? true : false;
-        config.#stdout = data.stdout ?? "use";
-        config.#stdin = data.stdin ?? "use";
+        config.#isMultiple = data.isMultiple;
+        config.#stdout = data.stdout;
+        config.#stdin = data.stdin;
         config.#execOption = data["exec-option"];
         const oldConfigID = ServerInstanceConfig.RecordServerConfigNamed.get(name);
         const oldConfig = ServerInstanceConfig.RecordServerConfig.get(oldConfigID as any);
@@ -425,43 +594,20 @@ class ServerInstance {
         const id = createID();
         const { params, cwd, execOption, isMultiple, stdin, stdout } = config;
         const server = new ServerInstance(id, config);
-        const stdioOption: IOType[] = [];
-        switch (stdin) {
-            case "ignore":
-                stdioOption[0] = "ignore";
-                break;
-            case "use":
-                stdioOption[0] = "pipe";
-                break;
-            default:
-                stdioOption[0] = "pipe";
-        }
-        switch (stdout) {
-            case "ignore":
-                stdioOption[1] = stdioOption[2] = "ignore";
-                break;
-            case "pass":
-                stdioOption[1] = stdioOption[2] = "inherit";
-                break;
-            case "use":
-                stdioOption[1] = stdioOption[2] = "pipe";
-                //TODO: implements stdout option: use
-                LOGGER.warn("stdout(use) have not been implemented");
-                break;
-            default:
-                stdioOption[1] = stdioOption[2] = "pipe";
-        }
         server.#serverProcess = serverProcess;
         if (serverProcess.killed || serverProcess.exitCode != null) {
             // 所以为什么要这样检测
             server.#isRunning = false;
         } else if (serverProcess.pid == undefined) {
             server.#isRunning = false;
+            serverProcess.on("spawn", () => {
+                server.#onCreate();
+            });
         } else {
             server.#isRunning = true;
+            server.#onCreate();
         }
         ServerInstance.RecordServerRunning.set(server.id, server);
-        server.#onCreate();
         return server;
     }
     /**
@@ -648,7 +794,10 @@ class Server {
     /**
      * 启动服务器
      */
-    async start() {
+    async start(): Promise<boolean> {
+        if (this.isRunning()) {
+            return false;
+        }
         this.#isActive = true;
         const unlock = await this.#restartLock.lock();
         this.updateInstanceConfig();
@@ -661,12 +810,13 @@ class Server {
                 this.#isActive = false;
             }
         }
+        return isSucceed;
     }
     #timeoutIdCrashRestart: NodeJS.Timeout | null = null;
     /**
      * 关闭服务器
      */
-    async stop(forceStop = false) {
+    async stop(forceStop = false): Promise<boolean> {
         if (forceStop) {
             if (this.#timeoutIdCrashRestart != null) {
                 clearTimeout(this.#timeoutIdCrashRestart);
@@ -675,11 +825,13 @@ class Server {
             this.#restartLock.unlock();
         }
         const unlock = await this.#restartLock.lock();
-        await this._stopProcess(forceStop);
+        let result = await this._stopProcess(forceStop);
         unlock();
         if (forceStop) {
             this.#isActive = false;
+            result = true;
         }
+        return result;
     }
     async forceStop() {
         return this.stop(true);
@@ -702,11 +854,13 @@ class Server {
     /**
      * 关闭服务器进程
      */
-    async _stopProcess(forceStop = false) {
+    async _stopProcess(forceStop = false): Promise<boolean> {
+        let result: boolean = false;
         if (this.instance != null) {
-            await this.instance.stop(forceStop);
+            result = await this.instance.stop(forceStop);
             await 1; //break
         }
+        return result;
     }
     /**
      * 重新启动服务器
@@ -720,29 +874,33 @@ class Server {
 }
 
 const Commands: Record<string, (args: string[], raw: string) => void> = {
+    "+debug": () => {
+        LOGGER.info("ServerInstance", ServerInstance);
+        LOGGER.info("ServerInstanceConfig", ServerInstanceConfig);
+        LOGGER.info("Main", Main.Instance);
+    },
     "+start": (args, raw) => {
         Main.Instance.execAction({
             action: "server-start",
             value: raw
         });
     },
-    "+stop": (args, raw) => {
-        let serverName: string;
-        let forceStop: boolean = false;
-        if (raw.lastIndexOf("false") + "false".length === raw.length) {
-            forceStop = false;
-            serverName = raw.substring(0, raw.lastIndexOf("false"));
-        } else if (raw.lastIndexOf("true") + "true".length === raw.length) {
-            forceStop = true;
-            serverName = raw.substring(0, raw.lastIndexOf("true"));
-        } else {
-            serverName = raw;
-        }
+    "+forceStop": (args, raw) => {
         Main.Instance.execAction({
             action: "server-stop",
-            value: serverName,
-            forceStop: forceStop
+            value: raw,
+            forceStop: true
         });
+    },
+    "+stop": (args, raw) => {
+        Main.Instance.execAction({
+            action: "server-stop",
+            value: raw,
+            forceStop: false
+        });
+    },
+    "stop": () => {
+        Main.Instance.stopScript();
     },
     "+restart": (args, raw) => {
         Main.Instance.execAction({
@@ -789,11 +947,30 @@ class Main {
     ListLoadedServers = new Set<Server>();
     RecordServers = new Map<string, Server>();
     ListSchedules = new Set<ScheduledTask>();
+    autoStarts: string[] = [];
+    shell: string[] = [];
     #readline: readline.ReadLine;
+
     nextCommand(cmd: string) {
-        
+        const p = firstArg(cmd);
+        const p0 = p?.arg ?? "+status";
+        const s = p?.subcommand.trim() ?? "";
+        const args: string[] = [];
+        let ap = firstArg(s);
+        while (ap?.arg != null) {
+            args.push(ap.arg);
+            ap = firstArg(ap.subcommand);
+        }
+        if (Commands[p0] != null) {
+            Commands[p0](args, s.trim());
+        } else {
+            LOGGER.error("无法识别的命令：", cmd);
+        }
     }
+
+
     async startScript() {
+        LOGGER.info("启动程序中");
         this.#readline = readline.createInterface({
             input: process.stdin,
             output: process.stderr,
@@ -801,21 +978,50 @@ class Main {
         this.#readline.on("line", this.nextCommand.bind(this));
 
         await this.reload(configFile);
-        if (this.autoStarts.length === 0) {
-            LOGGER.info("没有需要自启动的服务器");
-        }
-        for (const a of this.autoStarts) {
-            await this.startServer(a);
-        }
+        await this.startAutoStartsServers();
+        LOGGER.info("程序已启动");
     }
-    //TODO: 添加配置文件检查
+    async stopScript() {
+        LOGGER.info("正在结束运行");
+        this.#readline.close();
+        LOGGER.info("关闭服务器中")
+        await this.stopAllServer();
+        for (const serverInstance of ServerInstance.RecordServerRunning.values()) {
+            await serverInstance.forceStop();
+        }
+        LOGGER.info("程序已结束");
+        process.exit(0);
+    }
+
     async reload(file: string = configFile): Promise<boolean> {
         LOGGER.info("正在加载配置文件 %s", file);
+        try {
+            const result = await this.#reload(file);
+            if (result != null) {
+                console.log("加载了%s个服务器配置，已添加%s个计划任务",
+                    result.serverCount,
+                    result.scheduleCount
+                );
+                return true;
+            } else {
+                return false;
+            }
+        } catch (e) {
+            LOGGER.error("配置文件加载失败", e);
+            return false;
+        }
+    }
+    
+    async #reload(file: string = configFile): Promise<{ serverCount: number, scheduleCount: number } | null> {
         const starterConfig = await readConfigFile(file);
         if (starterConfig == null) {
             LOGGER.error("cannot reload the config file");
-            return false;
+            return null;
         }
+        const result = { serverCount: 0, scheduleCount: 0 };
+        DEBUG.debug("current config:", starterConfig);
+
+        // load servers to config object
         for (const iname in starterConfig.servers) {
             const starterInstanceConfig = starterConfig.servers[iname];
             const configId = ServerInstanceConfig.addServerConfig(iname, starterInstanceConfig);
@@ -832,7 +1038,10 @@ class Main {
                 this.RecordServers.set(server.name, server);
                 this.ListLoadedServers.add(server);
             }
+            result.serverCount++;
         }
+
+        // check deleted server config
         for (const [name, server] of this.RecordServers) {
             // 为了兼容多服务器的情况（isMultiple），应该读取server.config.name，而不是server.name
             const loadedServerConfig = ServerInstanceConfig.getNamedConfig(server.config.name);
@@ -845,37 +1054,45 @@ class Main {
             }
             server.updateInstanceConfig(loadedServerConfig);
         }
+
+        // apply autoRestarts
         for (const [name, server] of this.RecordServers) {
 
             if (!(this.ListLoadedServers.has(server)) && !server.isActive()) {
                 this.RecordServers.delete(name);
             }
 
-            if (starterConfig.autoRestarts?.includes(server.config.name)) {
+            if (starterConfig.autoRestarts.includes(server.config.name)) {
                 server.config.autoRestart = true;
             } else {
                 server.config.autoRestart = false;
             }
         }
-        if (typeof starterConfig.shell === "string") {
-            this.shell = [starterConfig.shell];
-        } else if (Array.isArray(starterConfig.shell)) {
+
+        if (starterConfig.shell != undefined)
             this.shell = starterConfig.shell;
-        } else {
+        else
             this.shell = ["/bin/bash"];
-        }
-        this.autoStarts = starterConfig.autoStarts ?? [];
+
+        this.autoStarts = starterConfig.autoStarts;
+
+        // clean old schedules
         this.ListSchedules.forEach(task => task.stop());
         this.ListSchedules.clear();
+
+        // load shcedule config
         for (const schedule of starterConfig.schedules) {
             const task = cron.schedule(schedule.cron, () => {
                 this.runSchedule(schedule);
             });
             this.ListSchedules.add(task);
+            result.scheduleCount++;
         }
-        LOGGER.trace(this);
-        return true;
+
+        DEBUG.debug(this);
+        return result;
     }
+
     createServerCopy(name: string): Server {
         const server = [...this.RecordServers.values()].find(s => s.config.name === name);
         if (server == undefined) {
@@ -895,8 +1112,28 @@ class Main {
 
         return serverCopy;
     }
-    autoStarts: string[] = [];
-    shell: string[] = [];
+    async startAutoStartsServers() {
+        if (this.autoStarts.length === 0) {
+            LOGGER.info("没有需要自启动的服务器");
+            return;
+        }
+        loopStarts:
+        for (const serverName of this.autoStarts) {
+            const allServers = this.findServers(serverName);
+            for (const server of allServers) {
+                if (server.isRunning()) {
+                    LOGGER.warn("自动启动服务器失败：服务器已在运行：", server.name);
+                    continue;
+                }
+                if (await server.start()) {
+                    await timeWait(1000);
+                } else {
+                    LOGGER.error("自动启动服务器失败：", serverName);
+                    continue loopStarts;
+                }
+            }
+        }
+    }
     async runSchedule(task: StarterSchedule) {
         LOGGER.debug("正在运行任务：%s", JSON.stringify(task));
         try {
@@ -908,11 +1145,12 @@ class Main {
     async execAction(action: StarterAction) {
         LOGGER.trace("执行操作：%s", JSON.stringify(action));
         try {
-            await this.execAction(action);
+            await this.#execAction(action);
         } catch (e) {
             LOGGER.error("在执行操作时出现错误：%s", JSON.stringify(action), e);
         }
     }
+
     async #execAction(action: StarterAction) {
         if (action.action === "cmd") {
             const cmdServerConfigName = `schedule$${createID(6)}`;
@@ -921,13 +1159,18 @@ class Main {
                 stopCommand: [{ type: "mixed" }],
                 stdin: "use",
                 stdout: "pass",
+                cwd: ".",
+                isMultiple: false,
+                "exec-option": null,
             });
             const cmdServerConfig = ServerInstanceConfig.getConfig(cmdServerConfigId) as ServerInstanceConfig;
             const serverProcess = child_process.spawn(action.value, [], {
                 cwd: action.cwd ?? baseDir,
                 timeout: action.timeout,
                 stdio: ["pipe", "inherit", "inherit"],
+                shell: true,
             });
+            const serverInstance = await ServerInstance.asServerInstance(cmdServerConfigName, cmdServerConfig, serverProcess);
             await new Promise<void>((resolve, reject) => {
                 serverProcess.on("error", (err) => {
                     reject(err);
@@ -942,7 +1185,6 @@ class Main {
                     ServerInstanceConfig.removeNamedConfig(cmdServerConfigName);
                 });
             });
-            const serverInstance = await ServerInstance.asServerInstance(cmdServerConfigName, cmdServerConfig, serverProcess);
         } else if (action.action === "server-start") {
             this.startServer(action.value);
         } else if (action.action === "server-stop") {
@@ -951,6 +1193,21 @@ class Main {
             this.restartServer(action.value);
         } else if (action.action === "server-kill") {
             this.sendSignalToServer(action.value, action.signal);
+        } else if (action.action === "stop-all-server") {
+            this.stopAllServer();
+        } else if (action.action === "start-auto-starts-server") {
+            await this.startAutoStartsServers();
+        }
+    }
+    
+    async stopAllServer() {
+        for (const serverName of this.autoStarts) {
+            await this.stopServer(serverName);
+        }
+        for (const server of this.RecordServers.values()) {
+            if (server.isRunning()) {
+                await this.stopServer(server.name);
+            }
         }
     }
     async sendSignalToServer(serverName: string, signal: NodeJS.Signals | number) {
@@ -978,6 +1235,28 @@ class Main {
                 server.instance?.serverProcess.kill(signal);
             }
         }
+    }
+    findServers(serverName: string): Server[] {
+        let serverConfig: ServerInstanceConfig | undefined = ServerInstanceConfig.getNamedConfig(serverName);
+        const allServers: Server[] = [];
+        if (serverConfig != undefined) {
+            for (const server of this.RecordServers.values()) {
+                if (server.config.name == serverName) {
+                    allServers.push(server);
+                }
+            }
+        } else {
+            const firstServer = this.RecordServers.get(serverName);
+            if (firstServer != undefined) {
+                allServers.push(firstServer);
+                serverConfig = firstServer.config.instanceConfig;
+            }
+        }
+        if (serverConfig == undefined) {
+            LOGGER.error("指定的服务器不存在：%s", serverName);
+            return [];
+        }
+        return allServers;
     }
     async stopServer(serverName: string, force: boolean = false) {
         let serverConfig: ServerInstanceConfig | undefined = ServerInstanceConfig.getNamedConfig(serverName);
@@ -1033,30 +1312,34 @@ class Main {
             await server.restart();
         }
     }
-    async startServer(serverName: string) {
+    async startServer(serverName: string): Promise<boolean> {
         const serverConfig = ServerInstanceConfig.getNamedConfig(serverName);
         if (serverConfig == undefined) {
             LOGGER.error("指定的服务器不存在：%s", serverName);
-            return;
+            return false;
         }
-        const allServers = [...this.RecordServers.values()].filter(s => s.config.instanceConfig.isMultiple && s.config.name === serverName);
+        const allServers = [...this.RecordServers.values()].filter(s => s.config.name === serverName);
         if (!serverConfig.isMultiple) {
             if (allServers.length > 1) {
                 LOGGER.error("指定的服务器未启用多实例，但是找到了多条服务器信息：%s", serverName);
             } else if (allServers.length === 1) {
-                await allServers[0].start();
+                if (allServers[0].isRunning()) {
+                    LOGGER.warn("服务器 %s 已在运行中，不会启动新的实例", serverName);
+                    return false;
+                }
+                return await allServers[0].start();
             } else {
                 LOGGER.error("服务器配置未初始化: " + serverName);
             }
-            return;
+            return false;
         }
-        let firstInactiveServer: Server | undefined = allServers.find(server => !server.isActive);
+        let firstInactiveServer: Server | undefined = allServers.find(server => !server.isActive());
         if (firstInactiveServer == undefined) {
             LOGGER.info("为 %s 初始化新的服务器", serverName);
             const newServer = this.createServerCopy(serverName);
             firstInactiveServer = newServer;
         }
-        await firstInactiveServer.start();
+        return await firstInactiveServer.start();
     }
 }
 

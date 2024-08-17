@@ -225,7 +225,7 @@ async function readConfigFile(file: string = configFile): Promise<ServerStarterE
         if (autoRestarts != undefined && !Array.isArray(autoRestarts)) {
             throw "autoRestarts must be string[]";
         }
-        config.autoStarts = autoRestarts ?? [];
+        config.autoStarts = autoStarts ?? [];
 
         //verify shell
         if (shell != undefined && !(Array.isArray(shell) || typeof shell === "string")) {
@@ -1204,6 +1204,7 @@ class Main {
     }
     
     async stopAllServer() {
+        LOGGER.info("正在停止所有服务器");
         for (const serverName of this.autoStarts) {
             await this.stopServer(serverName);
         }
@@ -1282,12 +1283,27 @@ class Main {
             return;
         }
 
+        if (allServers.length > 1) {
+            LOGGER.info("服务器 %s 有多个实例，正在停止所有实例", serverName);
+        } else if (allServers.length === 1){
+            LOGGER.info("正在关闭服务器 %s", serverName)
+        }
         for (const server of allServers) {
+            if (force) {
+                LOGGER.info("正在强行停止服务器 %s", server.name);
+            } else {
+                LOGGER.info("正在关闭服务器 %s", server.name);
+            }
             await server.stop(force);
         }
         if (allServers.length > 1 && serverConfig.isMultiple) {
+            await 1; // break
             for (const server of allServers.slice(1)) {
+                if (server.isActive()) {
+                    continue;
+                }
                 this.RecordServers.delete(server.name);
+                LOGGER.info("已从配置列表中移除服务器 %s", server.name);
             }
         }
     }

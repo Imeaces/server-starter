@@ -200,6 +200,7 @@ type ServerStarterConfig = {
     autoRestarts?: string[];
     shell?: string | string[]
     commands?: Record<string, StarterAction>
+    defaultOutput?: string
 };
 
 type ServerStarterExactConfig = {
@@ -209,6 +210,7 @@ type ServerStarterExactConfig = {
     autoRestarts: string[];
     shell?: string[]
     commands: Record<string, StarterAction>
+    defaultOutopt?: string
 };
 
 async function readConfigFile(file: string = configFile): Promise<ServerStarterExactConfig | null> {
@@ -222,7 +224,7 @@ async function readConfigFile(file: string = configFile): Promise<ServerStarterE
     };
     try {
         const data = yaml.load(await fs.readFile(file, "utf8")) as any;
-        const { schedules, servers, autoStarts, autoRestarts, shell, commands } = data as ServerStarterConfig;
+        const { schedules, servers, autoStarts, autoRestarts, shell, commands, defaultOutput } = data as ServerStarterConfig;
 
         // verify autoStarts
         if (autoStarts != undefined && !Array.isArray(autoStarts)) {
@@ -241,6 +243,10 @@ async function readConfigFile(file: string = configFile): Promise<ServerStarterE
             throw "shell must be string or string[]";
         }
         config.shell = typeof shell === "string" ? [shell] : shell;
+
+        if (defaultOutput != undefined && typeof defaultOutput !== "string") {
+            throw "defaultOutput must be string";
+        }
 
         //verify schedules
         if (schedules != undefined && !Array.isArray(schedules)) {
@@ -333,7 +339,7 @@ const _startUptime = Date.now();
 cron.schedule("* * * * * *", () => {
     _uptime += 1;
 }, {
-    "recoverMissedExecutions": true,
+    "recoverMissedExecutions": false,
     "scheduled": true,
 })
 function getUptimeText() {
@@ -766,8 +772,9 @@ class Server {
             return;
         }
         // 服务器未在运行，直接替换配置
-        if (!this.isRunning) {
+        if (!this.isRunning()) {
             this.config.instanceConfig = config;
+            this.#logger.info("服务器配置已更新");
         }
         // 服务器配置已更新，但是目前服务器正在运行
         // 更新服务器配置
@@ -924,12 +931,12 @@ const Commands: Record<string, (args: string[], raw: string) => void> = {
         Main.Instance.reload();
     },
     "+ps": () => {
-        const allServers = [...Main.Instance.RecordServers.values()];
+        const allServers = [...Main.Instance.serverManager.RecordServers.values()];
         console.log("已经加载了下列服务：", allServers.map(server => server.name).join(" "));
         console.log("正在运行下列服务：", allServers.filter(server => server.isRunning()).map(server => server.name).join(" "));
     },
     "+status": () => {
-        const allServers = [...Main.Instance.RecordServers.values()];
+        const allServers = [...Main.Instance.serverManager.RecordServers.values()];
         const runningServers = allServers.filter(server => server.isRunning());
         const activeServers = allServers.filter(server => server.isActive());
         const inactiveServers = allServers.filter(server => !server.isActive());
@@ -954,11 +961,219 @@ const Commands: Record<string, (args: string[], raw: string) => void> = {
     },
 };
 
-class Main {
-    static Instance: Main = null as any;
+class ServerOutputManager {
+    #output: string | null = null;
+    constructor(main: Main) {
+        
+    }
+}
+
+class ServerManager {
     ListLoadedServers = new Set<Server>();
     RecordServers = new Map<string, Server>();
+    main: Main;
+    get logger() {
+        return this.main.logger;
+    }
+    constructor(main: Main) {
+        this.main = main;
+    }
+    async stopAllServer() {
+        this.logger.info("正在停止所有服务器");
+        for (const serverName of this.main.autoStarts) {
+            await this.stopServer(serverName);
+        }
+        for (const server of this.RecordServers.values()) {
+            if (server.isRunning()) {
+                await this.stopServer(server.name);
+            }
+        }
+    }
+    async sendSignalToServer(serverName: string, signal: NodeJS.Signals | number) {
+        const serverConfig = ServerInstanceConfig.getNamedConfig(serverName);
+        const allServers: Server[] = [];
+        if (serverConfig != undefined) {
+            for (const server of this.RecordServers.values()) {
+                if (server.config.name == serverName) {
+                    allServers.push(server);
+                }
+            }
+        } else {
+            const firstServer = this.RecordServers.get(serverName);
+            if (firstServer != undefined) {
+                allServers.push(firstServer);
+            }
+        }
+        if (allServers.length === 0) {
+            this.logger.error("指定的服务器不存在：%s", serverName);
+            return;
+        }
+
+        for (const server of allServers) {
+            if (server.isRunning()) {
+                server.instance?.serverProcess.kill(signal);
+            }
+        }
+    }
+    findRelaventInstanceConfig(serverName: string): ServerInstanceConfig | undefined {
+        let serverConfig: ServerInstanceConfig | undefined = ServerInstanceConfig.getNamedConfig(serverName);
+        if (serverConfig == undefined) {
+            const server = this.RecordServers.get(serverName);
+            if (server != undefined) {
+                serverConfig = server.latestInstanceConfig;
+            }
+        }
+        return serverConfig;
+    }
+    /**
+     * 获取所有与指定参数有关的服务器实例。
+     * 
+     * 如果设置`slientError`为`true`，在没有找到服务器时不会发生任何事情，只是返回空数组；
+     * 如果未设置`slientError`，在没有找到服务器时会在日志中输出警告，并返回空数组；
+     * 如果设置`slientError`为`false`，在没有找到服务器时会抛出错误。
+     * 
+     * @param serverName 与服务器关联的名字
+     * @returns 返回与给定的名字关联的所有服务器
+     * @throws 如果设置`slientError`为`false`并且没有找到任何服务器，则抛出TypeError以表示未能找到服务器。
+     */
+    findServers(serverName: string, slientError: boolean = false): Server[] {
+        let serverConfig: ServerInstanceConfig | undefined = ServerInstanceConfig.getNamedConfig(serverName);
+        const allServers: Server[] = [];
+        if (serverConfig != undefined) {
+            for (const server of this.RecordServers.values()) {
+                if (serverConfig.equals(server.latestInstanceConfig)) {
+                    allServers.push(server);
+                }
+            }
+        } else {
+            const server = this.RecordServers.get(serverName);
+            if (server != undefined) {
+                allServers.push(server);
+                serverConfig = server.latestInstanceConfig;
+            }
+        }
+        if (serverConfig == undefined && !slientError) {
+            this.logger.warn("无法找到服务器 %s：", serverName, new TypeError("no config match to " + serverName));
+        }
+        return allServers;
+    }
+    async stopServer(serverName: string, force: boolean = false) {
+        const allServers = this.findServers(serverName);
+        const serverConfig = this.findRelaventInstanceConfig(serverName) as ServerInstanceConfig;
+
+        if (allServers.length > 1) {
+            this.logger.info("服务器 %s 有多个实例，将会停止所有实例", serverName);
+        } else if (allServers.length === 1){
+            this.logger.info("正在关闭服务器 %s", serverName)
+        }
+        for (const server of allServers) {
+            if (force) {
+                this.logger.info("正在强行停止服务器 %s", server.name);
+            } else {
+                this.logger.info("正在关闭服务器 %s", server.name);
+            }
+            await server.stop(force);
+        }
+        if (allServers.length > 1 && serverConfig.isMultiple) {
+            await 1; // break
+            for (const server of allServers.slice(1)) {
+                if (server.isActive()) {
+                    continue;
+                }
+                this.RecordServers.delete(server.name);
+                this.logger.info("已从配置列表中移除服务器 %s", server.name);
+            }
+        }
+    }
+    async restartServer(serverName: string) {
+        const serverConfig = this.findRelaventInstanceConfig(serverName) as ServerInstanceConfig;
+        const allServers = this.findServers(serverName);
+        if (allServers.length > 1) {
+            this.logger.info("服务器 %s 有多个实例，将会重启所有实例", serverName);
+        }
+        for (const server of allServers) {
+            await server.restart();
+        }
+    }
+    async startServer(serverName: string): Promise<boolean> {
+        const serverConfig = ServerInstanceConfig.getNamedConfig(serverName);
+        if (serverConfig == undefined) {
+            this.logger.error("指定的服务器不存在：%s", serverName);
+            return false;
+        }
+        const allServers = [...this.RecordServers.values()].filter(server => serverConfig.equals(server.latestInstanceConfig));
+        if (!serverConfig.isMultiple && allServers.length > 1) {
+            this.logger.error("指定的服务器未启用多实例，但是找到了多条服务器信息：%s", serverName);
+            return false;
+        } else if (!serverConfig.isMultiple && allServers.length === 1 && allServers[0].isRunning()) {
+            this.logger.warn("服务器 %s 已在运行中，不会启动新的实例", serverName);
+            return false;
+        } else if (!serverConfig.isMultiple && allServers.length === 0) {
+            this.logger.error("服务器配置未初始化: " + serverName);
+            return false;
+        }
+        let firstInactiveServer: Server | undefined = allServers.find(server => !server.isActive());
+        if (firstInactiveServer == undefined) {
+            if (serverConfig.isMultiple) {
+                this.logger.info("为 %s 初始化新的服务器", serverName);
+                const newServer: Server = this.createServerCopy(serverName);
+                firstInactiveServer = newServer;
+            } else {
+                firstInactiveServer = allServers[0];
+            }
+        }
+        if (firstInactiveServer.isActive()) {
+            this.logger.error("无法启动服务器 %s，服务器正忙于特定操作");
+            return false;
+        } else {
+            return await firstInactiveServer.start();
+        }
+    }
+    async sendServerCommand(serverName: string, command: string) {
+        const servers = this.findServers(serverName);
+        if (servers.length !== 1) {
+            this.logger.error("服务器 %s 有 %d 个实例，无法确定要发送命令的服务器", serverName, servers.length);
+            return;
+        }
+        const server = servers[0];
+        if (server.isRunning()) {
+            server.instance?.sendCommand(command);
+        } else {
+            this.logger.error("服务器 %s 未运行，无法发送命令", serverName);
+        }
+    }
+    createServerCopy(name: string): Server {
+        const server = [...this.RecordServers.values()].find(s => s.config.name === name);
+        if (server == undefined) {
+            throw new TypeError(`Server ${name} not found`);
+        }
+        const { latestInstanceConfig: instanceConfig, config: serverConfig } = server;
+        const serverInstanceConfig = server.latestInstanceConfig;
+        if (!serverInstanceConfig.isMultiple) {
+            throw new TypeError(`Server ${name} is not a multiple server`);
+        }
+        const serverCopy = new Server(Object.assign({}, serverConfig, { instanceConfig }));
+
+        this.RecordServers.set(serverCopy.name, serverCopy);
+        if (this.ListLoadedServers.has(server)) {
+            this.ListLoadedServers.add(serverCopy);
+        }
+
+        return serverCopy;
+    }
+}
+
+class Main {
+    logger = LOGGER;
+    static Instance: Main = null as any;
+    serverManager: ServerManager;
+    serverOutputManager: ServerOutputManager;
     ListSchedules = new Set<ScheduledTask>();
+    constructor() {
+        this.serverOutputManager = new ServerOutputManager(this);
+        this.serverManager = new ServerManager(this);
+    }
+
     autoStarts: string[] = [];
     shell: string[] = [];
     #readline: readline.ReadLine;
@@ -976,13 +1191,13 @@ class Main {
         if (Commands[p0] != null) {
             Commands[p0](args, s.trim());
         } else {
-            LOGGER.error("无法识别的命令：", cmd);
+            this.logger.error("无法识别的命令：", cmd);
         }
     }
 
 
     async startScript() {
-        LOGGER.info("启动程序中");
+        this.logger.info("启动程序中");
         this.#readline = readline.createInterface({
             input: process.stdin,
             output: process.stderr,
@@ -991,22 +1206,22 @@ class Main {
 
         await this.reload(configFile);
         await this.startAutoStartsServers();
-        LOGGER.info("程序已启动");
+        this.logger.info("程序已启动");
     }
     async stopScript() {
-        LOGGER.info("正在结束运行");
+        this.logger.info("正在结束运行");
         this.#readline.close();
-        LOGGER.info("关闭服务器中")
-        await this.stopAllServer();
+        this.logger.info("关闭服务器中")
+        await this.serverManager.stopAllServer();
         for (const serverInstance of ServerInstance.RecordServerRunning.values()) {
             await serverInstance.forceStop();
         }
-        LOGGER.info("程序已结束");
+        this.logger.info("程序已结束");
         process.exit(0);
     }
 
     async reload(file: string = configFile): Promise<boolean> {
-        LOGGER.info("正在加载配置文件 %s", file);
+        this.logger.info("正在加载配置文件 %s", file);
         try {
             const result = await this.#reload(file);
             if (result != null) {
@@ -1019,7 +1234,7 @@ class Main {
                 return false;
             }
         } catch (e) {
-            LOGGER.error("配置文件加载失败", e);
+            this.logger.error("配置文件加载失败", e);
             return false;
         }
     }
@@ -1027,7 +1242,7 @@ class Main {
     async #reload(file: string = configFile): Promise<{ serverCount: number, scheduleCount: number } | null> {
         const starterConfig = await readConfigFile(file);
         if (starterConfig == null) {
-            LOGGER.error("cannot reload the config file");
+            this.logger.error("cannot reload the config file");
             return null;
         }
         const result = { serverCount: 0, scheduleCount: 0 };
@@ -1039,7 +1254,7 @@ class Main {
             const configId = ServerInstanceConfig.addServerConfig(iname, starterInstanceConfig);
             const config = ServerInstanceConfig.getConfig(configId) as ServerInstanceConfig;
             // 需要检查multiple服务器
-            if (!this.RecordServers.has(iname) && undefined == [...this.RecordServers.values()].find(_ => _.config.name === iname)) {
+            if (!this.serverManager.RecordServers.has(iname) && undefined == [...this.serverManager.RecordServers.values()].find(_ => _.config.name === iname)) {
                 // 新的服务器配置，创建新的Server
                 const server = new Server({
                     instanceConfig: config,
@@ -1047,20 +1262,20 @@ class Main {
                     name: config.name,
                 });
 
-                this.RecordServers.set(server.name, server);
-                this.ListLoadedServers.add(server);
+                this.serverManager.RecordServers.set(server.name, server);
+                this.serverManager.ListLoadedServers.add(server);
             }
             result.serverCount++;
         }
 
         // check deleted server config
-        for (const [name, server] of this.RecordServers) {
+        for (const [name, server] of this.serverManager.RecordServers) {
             // 为了兼容多服务器的情况（isMultiple），应该读取server.config.name，而不是server.name
             const loadedServerConfig = ServerInstanceConfig.getNamedConfig(server.config.name);
             // 服务器配置被删除，所以同步移除服务器
             if (loadedServerConfig == undefined) {
 
-                this.ListLoadedServers.delete(server);
+                this.serverManager.ListLoadedServers.delete(server);
 
                 continue;
             }
@@ -1068,10 +1283,10 @@ class Main {
         }
 
         // apply autoRestarts
-        for (const [name, server] of this.RecordServers) {
+        for (const [name, server] of this.serverManager.RecordServers) {
 
-            if (!(this.ListLoadedServers.has(server)) && !server.isActive()) {
-                this.RecordServers.delete(name);
+            if (!(this.serverManager.ListLoadedServers.has(server)) && !server.isActive()) {
+                this.serverManager.RecordServers.delete(name);
             }
 
             if (starterConfig.autoRestarts.includes(server.config.name)) {
@@ -1105,61 +1320,42 @@ class Main {
         return result;
     }
 
-    createServerCopy(name: string): Server {
-        const server = [...this.RecordServers.values()].find(s => s.config.name === name);
-        if (server == undefined) {
-            throw new TypeError(`Server ${name} not found`);
-        }
-        const { latestInstanceConfig: instanceConfig, config: serverConfig } = server;
-        const serverInstanceConfig = server.latestInstanceConfig;
-        if (!serverInstanceConfig.isMultiple) {
-            throw new TypeError(`Server ${name} is not a multiple server`);
-        }
-        const serverCopy = new Server(Object.assign({}, serverConfig, { instanceConfig }));
-
-        this.RecordServers.set(serverCopy.name, serverCopy);
-        if (this.ListLoadedServers.has(server)) {
-            this.ListLoadedServers.add(serverCopy);
-        }
-
-        return serverCopy;
-    }
     async startAutoStartsServers() {
         if (this.autoStarts.length === 0) {
-            LOGGER.info("没有需要自启动的服务器");
+            this.logger.info("没有需要自启动的服务器");
             return;
         }
         loopStarts:
         for (const serverName of this.autoStarts) {
-            const allServers = this.findServers(serverName);
+            const allServers = this.serverManager.findServers(serverName);
             for (const server of allServers) {
                 if (server.isRunning()) {
-                    LOGGER.warn("自动启动服务器失败：服务器已在运行：", server.name);
+                    this.logger.warn("自动启动服务器失败：服务器已在运行：", server.name);
                     continue;
                 }
                 if (await server.start()) {
                     await timeWait(1000);
                 } else {
-                    LOGGER.error("自动启动服务器失败：", serverName);
+                    this.logger.error("自动启动服务器失败：", serverName);
                     continue loopStarts;
                 }
             }
         }
     }
     async runSchedule(task: StarterSchedule) {
-        LOGGER.debug("正在运行任务：%s", JSON.stringify(task));
+        this.logger.debug("正在运行任务：%s", JSON.stringify(task));
         try {
             await this.#execAction(task);
         } catch (e) {
-            LOGGER.error("在执行计划任务时出现错误：", e);
+            this.logger.error("在执行计划任务时出现错误：", e);
         }
     }
     async execAction(action: StarterAction) {
-        LOGGER.trace("执行操作：%s", JSON.stringify(action));
+        this.logger.trace("执行操作：%s", JSON.stringify(action));
         try {
             await this.#execAction(action);
         } catch (e) {
-            LOGGER.error("在执行操作时出现错误：%s", JSON.stringify(action), e);
+            this.logger.error("在执行操作时出现错误：%s", JSON.stringify(action), e);
         }
     }
 
@@ -1198,177 +1394,20 @@ class Main {
                 });
             });
         } else if (action.action === "server-start") {
-            this.startServer(action.value);
+            this.serverManager.startServer(action.value);
         } else if (action.action === "server-stop") {
-            this.stopServer(action.value, action.forceStop);
+            this.serverManager.stopServer(action.value, action.forceStop);
         } else if (action.action === "server-restart") {
-            this.restartServer(action.value);
+            this.serverManager.restartServer(action.value);
         } else if (action.action === "server-kill") {
-            this.sendSignalToServer(action.value, action.signal);
+            this.serverManager.sendSignalToServer(action.value, action.signal);
         } else if (action.action === "stop-all-server") {
-            this.stopAllServer();
+            this.serverManager.stopAllServer();
         } else if (action.action === "start-auto-starts-server") {
             await this.startAutoStartsServers();
         }
     }
     
-    async stopAllServer() {
-        LOGGER.info("正在停止所有服务器");
-        for (const serverName of this.autoStarts) {
-            await this.stopServer(serverName);
-        }
-        for (const server of this.RecordServers.values()) {
-            if (server.isRunning()) {
-                await this.stopServer(server.name);
-            }
-        }
-    }
-    async sendSignalToServer(serverName: string, signal: NodeJS.Signals | number) {
-        const serverConfig = ServerInstanceConfig.getNamedConfig(serverName);
-        const allServers: Server[] = [];
-        if (serverConfig != undefined) {
-            for (const server of this.RecordServers.values()) {
-                if (server.config.name == serverName) {
-                    allServers.push(server);
-                }
-            }
-        } else {
-            const firstServer = this.RecordServers.get(serverName);
-            if (firstServer != undefined) {
-                allServers.push(firstServer);
-            }
-        }
-        if (allServers.length === 0) {
-            LOGGER.error("指定的服务器不存在：%s", serverName);
-            return;
-        }
-
-        for (const server of allServers) {
-            if (server.isRunning()) {
-                server.instance?.serverProcess.kill(signal);
-            }
-        }
-    }
-    findServers(serverName: string): Server[] {
-        let serverConfig: ServerInstanceConfig | undefined = ServerInstanceConfig.getNamedConfig(serverName);
-        const allServers: Server[] = [];
-        if (serverConfig != undefined) {
-            for (const server of this.RecordServers.values()) {
-                if (server.config.name == serverName) {
-                    allServers.push(server);
-                }
-            }
-        } else {
-            const firstServer = this.RecordServers.get(serverName);
-            if (firstServer != undefined) {
-                allServers.push(firstServer);
-                serverConfig = firstServer.config.instanceConfig;
-            }
-        }
-        if (serverConfig == undefined) {
-            LOGGER.error("指定的服务器不存在：%s", serverName);
-            return [];
-        }
-        return allServers;
-    }
-    async stopServer(serverName: string, force: boolean = false) {
-        let serverConfig: ServerInstanceConfig | undefined = ServerInstanceConfig.getNamedConfig(serverName);
-        const allServers: Server[] = [];
-        if (serverConfig != undefined) {
-            for (const server of this.RecordServers.values()) {
-                if (server.config.name == serverName) {
-                    allServers.push(server);
-                }
-            }
-        } else {
-            const firstServer = this.RecordServers.get(serverName);
-            if (firstServer != undefined) {
-                allServers.push(firstServer);
-                serverConfig = firstServer.config.instanceConfig;
-            }
-        }
-        if (serverConfig == undefined) {
-            LOGGER.error("指定的服务器不存在：%s", serverName);
-            return;
-        }
-
-        if (allServers.length > 1) {
-            LOGGER.info("服务器 %s 有多个实例，正在停止所有实例", serverName);
-        } else if (allServers.length === 1){
-            LOGGER.info("正在关闭服务器 %s", serverName)
-        }
-        for (const server of allServers) {
-            if (force) {
-                LOGGER.info("正在强行停止服务器 %s", server.name);
-            } else {
-                LOGGER.info("正在关闭服务器 %s", server.name);
-            }
-            await server.stop(force);
-        }
-        if (allServers.length > 1 && serverConfig.isMultiple) {
-            await 1; // break
-            for (const server of allServers.slice(1)) {
-                if (server.isActive()) {
-                    continue;
-                }
-                this.RecordServers.delete(server.name);
-                LOGGER.info("已从配置列表中移除服务器 %s", server.name);
-            }
-        }
-    }
-    async restartServer(serverName: string) {
-        const serverConfig = ServerInstanceConfig.getNamedConfig(serverName);
-        const allServers: Server[] = [];
-        if (serverConfig != undefined) {
-            for (const server of this.RecordServers.values()) {
-                if (server.config.name === serverName) {
-                    allServers.push(server);
-                }
-            }
-        } else {
-            const firstServer = this.RecordServers.get(serverName);
-            if (firstServer != undefined) {
-                allServers.push(firstServer);
-            }
-        }
-        if (allServers.length === 0) {
-            LOGGER.error("指定的服务器不存在：%s", serverName);
-            return;
-        }
-
-        for (const server of allServers) {
-            await server.restart();
-        }
-    }
-    async startServer(serverName: string): Promise<boolean> {
-        const serverConfig = ServerInstanceConfig.getNamedConfig(serverName);
-        if (serverConfig == undefined) {
-            LOGGER.error("指定的服务器不存在：%s", serverName);
-            return false;
-        }
-        const allServers = [...this.RecordServers.values()].filter(s => s.config.name === serverName);
-        if (!serverConfig.isMultiple) {
-            if (allServers.length > 1) {
-                LOGGER.error("指定的服务器未启用多实例，但是找到了多条服务器信息：%s", serverName);
-            } else if (allServers.length === 1) {
-                if (allServers[0].isRunning()) {
-                    LOGGER.warn("服务器 %s 已在运行中，不会启动新的实例", serverName);
-                    return false;
-                }
-                return await allServers[0].start();
-            } else {
-                LOGGER.error("服务器配置未初始化: " + serverName);
-            }
-            return false;
-        }
-        let firstInactiveServer: Server | undefined = allServers.find(server => !server.isActive());
-        if (firstInactiveServer == undefined) {
-            LOGGER.info("为 %s 初始化新的服务器", serverName);
-            const newServer = this.createServerCopy(serverName);
-            firstInactiveServer = newServer;
-        }
-        return await firstInactiveServer.start();
-    }
 }
 
 Main.Instance = new Main();

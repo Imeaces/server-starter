@@ -92,6 +92,15 @@ function main() {
     }
     LOGGER.info("baseDir: %s，configFile：%s", baseDir, configFile);
     Main.Instance.startScript();
+    const stopCallback = () => {
+        Main.Instance.stopScript();
+    };
+    process.on("SIGTERM", stopCallback);
+    process.on("SIGINT", stopCallback);
+    process.on("SIGHUP", () => {
+        LOGGER.info("接收到SIGHUP信号，重新加载配置文件中");
+        Main.Instance.reload();
+    });
 }
 
 /**

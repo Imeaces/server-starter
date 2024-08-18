@@ -1141,7 +1141,7 @@ class ServerManager {
             }
         }
         if (firstInactiveServer.isActive()) {
-            this.logger.error("无法启动服务器 %s，服务器正忙于特定操作");
+            this.logger.error("无法启动服务器 %s，服务器正忙于特定操作", firstInactiveServer.name);
             return false;
         } else {
             return await firstInactiveServer.start();

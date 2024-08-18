@@ -1049,7 +1049,8 @@ class ServerManager {
         }
         if (serverIndex == undefined) {
             for (const server of allServers) {
-                if (!server.isRunning()) {
+                if (!server.isRunning() && !force) {
+                    this.logger.warn("不对服务器进行关闭操作，因为服务器未在运行");
                     continue;
                 }
                 if (force) {
@@ -1256,7 +1257,7 @@ class Main {
         try {
             const result = await this.#reload(file);
             if (result != null) {
-                console.log("加载了%s个服务器配置，已添加%s个计划任务",
+                this.logger.info("加载了%s个服务器配置，已添加%s个计划任务",
                     result.serverCount,
                     result.scheduleCount
                 );

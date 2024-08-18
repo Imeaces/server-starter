@@ -687,6 +687,7 @@ type ServerConfig = {
 
 class Server {
     readonly id: ServerRunID = createID(5);
+    #isStopped = true;
     #instance: ServerInstance | null = null;
     #config: ServerConfig;
     get instance(): ServerInstance | null {
@@ -767,6 +768,9 @@ class Server {
         if (this.#instance != null || !this.config.autoRestart) {
             return;
         }
+        if (this.#isStopped){
+           return;
+        }
         if (unlock == undefined) {
             unlock = await this.#restartLock.lock();
         }
@@ -799,6 +803,8 @@ class Server {
             } else {
                 this.#isActive = false;
             }
+        } else {
+           this.#isStopped = false;
         }
         return isSucceed;
     }
@@ -817,9 +823,13 @@ class Server {
         const unlock = await this.#restartLock.lock();
         let result = await this._stopProcess(forceStop);
         unlock();
+        if (result){
+            this.#isStopped = true;
+        }
         if (forceStop) {
             this.#isActive = false;
             result = true;
+            this.#isStopped = true;
         }
         return result;
     }
@@ -914,7 +924,7 @@ const Commands: Record<string, (this: Main, args: string[], raw: string) => void
     "+output": function(args, raw) {
         const output = args[0];
         if (output != null) {
-            this.setOutput(output);
+            this.setOutput(output, true);
         } else {
             console.log("当前命令输出为", this.commandOutput);
         }
@@ -1357,7 +1367,7 @@ class Main {
         }
 
         if (!this.isOutputAvailable() && this.defaultCommandOutput != null) {
-            this.setOutput(this.defaultCommandOutput);
+            this.setOutput(this.defaultCommandOutput, true);
         }
 
         DEBUG.debug(this);

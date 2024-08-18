@@ -770,7 +770,7 @@ class Server {
         if (unlock == undefined) {
             unlock = await this.#restartLock.lock();
         }
-        if (this.#crashRestartTimeLimit.exceed()) {
+        if (this.#crashRestartTimeLimit.next()) {
             this.#logger.warn("服务器崩溃自动重启的次数过多，稍后再尝试重新启动");
             this.#timeoutIdCrashRestart = setTimeout(() => {
                 this.#doAutoRestart(unlock);

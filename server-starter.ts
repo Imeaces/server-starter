@@ -891,7 +891,7 @@ const Commands: Record<string, (this: Main, args: string[], raw: string) => void
     },
     "+send": function(args, raw) {
         const { arg: serverName, subcommand: command } = firstArg(raw) ?? {};
-        if (serverName == null || command == null) {
+        if (serverName == null || command == null || serverName.length === 0) {
             console.log("请输入正确的命令格式：+send <服务器名称> <命令>");
             return;
         }

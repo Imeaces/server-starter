@@ -125,8 +125,18 @@ type StarterAction = { action: string, value?: any } & (
     | StarterStartAutoStartsServerAction
     | StarterStopScriptAction
     | StarterSendServerCommandAction
+    | StarterSleepAction
+    | StarterMultiAction
 );
 
+type StarterMultiAction = {
+   action: "multi"
+   value: StarterAction[]
+};
+type StarterSleepAction = {
+   action: "wait"
+   value: number
+};
 type StarterCmdAction = {
     action: "cmd"
     value: string
@@ -974,7 +984,7 @@ class ServerManager {
     }
     async stopAllServer() {
         this.logger.info("正在停止所有服务器");
-        for (const serverName of this.main.autoStarts) {
+        for (const serverName of this.main.autoStarts.toReversed()) {
             await this.stopServer(serverName);
         }
         for (const server of this.RecordServers.values()) {
@@ -1415,7 +1425,7 @@ class Main {
 
     async #execAction(action: StarterAction) {
         if (action.action === "cmd") {
-            const cmdServerConfigName = `schedule$${createID(6)}`;
+            const cmdServerConfigName = `cmd$${createID(6)}`;
             const cmdServerConfigId = ServerInstanceConfig.addServerConfig(cmdServerConfigName, {
                 params: [],
                 stopCommands: [{ type: "mixed" }],
@@ -1439,7 +1449,7 @@ class Main {
                     serverInstance?.forceStop();
                 });
                 serverProcess.on("spawn", () => {
-                    serverInstance?.logger.info("进程已启动");
+                    serverInstance?.logger.debug("进程已启动");
                 });
                 serverProcess.on('exit', () => {
                     resolve();
@@ -1448,19 +1458,25 @@ class Main {
                 });
             });
         } else if (action.action === "server-start") {
-            this.serverManager.startServer(action.server, action.serverIndex);
+            await this.serverManager.startServer(action.server, action.serverIndex);
         } else if (action.action === "server-stop") {
-            this.serverManager.stopServer(action.server, action.forceStop, action.serverIndex);
+            await this.serverManager.stopServer(action.server, action.forceStop, action.serverIndex);
         } else if (action.action === "server-restart") {
-            this.serverManager.restartServer(action.server, action.serverIndex);
+            await this.serverManager.restartServer(action.server, action.serverIndex);
         } else if (action.action === "server-kill") {
-            this.serverManager.sendSignalToServer(action.server, action.value, action.serverIndex);
+            await this.serverManager.sendSignalToServer(action.server, action.value, action.serverIndex);
         } else if (action.action === "server-command") {
-            this.sendServerCommand(action.server, action.server, action.serverIndex);
+            await this.sendServerCommand(action.server, action.server, action.serverIndex);
         } else if (action.action === "stop-all-server") {
-            this.serverManager.stopAllServer();
+            await this.serverManager.stopAllServer();
         } else if (action.action === "start-auto-starts-server") {
             await this.startAutoStartsServers();
+        } else if (action.action === "multi"){
+           for (const action1 of action.value){
+              await this.#execAction(action1);
+           }
+        } else if (action.action === "wait"){
+           await timeWait(action.value);
         }
     }
     sendServerCommand(serverName: string, command: string, serverIndex?: number): boolean {

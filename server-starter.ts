@@ -1048,6 +1048,9 @@ class ServerManager {
         }
         if (serverIndex == undefined) {
             for (const server of allServers) {
+                if (!server.isRunning()) {
+                    continue;
+                }
                 if (force) {
                     this.logger.info("正在强行停止服务器 %s", server.name);
                 } else {

@@ -1045,8 +1045,6 @@ class ServerManager {
 
         if (allServers.length > 1 && serverIndex == undefined) {
             this.logger.info("服务器 %s 有多个实例，将会停止所有实例", serverName);
-        } else if (allServers.length === 1){
-            this.logger.info("正在关闭服务器 %s", serverName)
         }
         if (serverIndex == undefined) {
             for (const server of allServers) {
@@ -1061,7 +1059,7 @@ class ServerManager {
             const server = allServers[serverIndex];
             if (server == undefined) {
                 this.logger.error("未找到服务器 %s 的第 %s 个实例", serverName, serverIndex + 1);
-            } else {
+            } else if (server.isRunning()){
                 if (force) {
                     this.logger.info("正在强行停止服务器 %s", server.name);
                 } else {
@@ -1183,14 +1181,13 @@ class Main {
         if (Commands[p0] != null) {
             Commands[p0](args, s.trim());
         } else {
-            this.logger.error("无法识别的命令：", cmd);
-        }
-        if (this.isOutputAvailable()) {
-            this.sendServerCommand(this.commandOutput as string, cmd);
-        } else {
-            this.logger.warn("命令输出不可用");
-            if (this.defaultCommandOutput != null && this.isOutputAvailable(this.defaultCommandOutput)) {
-                this.logger.info("默认输出已切换到服务器 %s", this.defaultCommandOutput);
+            if (this.isOutputAvailable()) {
+                this.sendServerCommand(this.commandOutput as string, cmd);
+            } else {
+                this.logger.warn("命令输出不可用");
+                if (this.defaultCommandOutput != null && this.isOutputAvailable(this.defaultCommandOutput)) {
+                    this.logger.info("默认输出已切换到服务器 %s", this.defaultCommandOutput);
+                }
             }
         }
     }

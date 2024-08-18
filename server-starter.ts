@@ -121,7 +121,7 @@ type ServerConfigID = ID;
 type ServerRunID = ID;
 
 type StarterSchedule = { cron: string } & StarterAction;
-type StarterAction = { action: string, value: any } & (
+type StarterAction = { action: string, value?: any } & (
     StarterStopAllServerAction
     | StarterSignalServerAction
     | StarterStartServerAction
@@ -141,21 +141,31 @@ type StarterCmdAction = {
 };
 type StarterRestartServerAction = {
     action: "server-restart"
-    value: string
+    server: string
+    serverIndex?: number
 }
 type StarterStartServerAction = {
     action: "server-start"
-    value: string
+    server: string
+    serverIndex?: number
 }
 type StarterStopServerAction = {
     action: "server-stop"
-    value: string
+    server: string
+    serverIndex?: number
     forceStop?: boolean
 }
 type StarterSignalServerAction = {
     action: "server-kill"
+    server: string
+    serverIndex?: number
+    value: NodeJS.Signals | number
+}
+type StarterSendServerCommandAction = {
+    action: "server-command"
+    server: string
+    serverIndex?: number
     value: string
-    signal: NodeJS.Signals | number
 }
 type StarterStopAllServerAction = {
     action: "stop-all-server"
@@ -166,31 +176,15 @@ type StarterStartAutoStartsServerAction = {
 type StarterStopScriptAction = {
     action: "stop-script"
 }
-type StarterSendServerCommandAction = {
-    action: "send-server-command"
-    value: string
-    server: string
-    isMultiple?: boolean
-}
 
 type StarterServerConfig = {
-    cwd?: string
-    "exec-option"?: any
     params: string | string[],
+    "exec-option"?: any
+    cwd?: string
     isMultiple?: boolean
     stdout?: "use" | "pass" | "ignore"
     stdin?: "use" | "ignore"
-    stopCommand?: ServerInstanceConfigStopCommand[]
-};
-
-type StarterServerExactConfig = {
-    cwd: string
-    "exec-option": any
-    params: string[],
-    isMultiple: boolean
-    stdout: "use" | "pass" | "ignore"
-    stdin: "use" | "ignore"
-    stopCommand: ServerInstanceConfigStopCommand[]
+    stopCommands?: ServerInstanceConfigStopCommand[]
 };
 
 type ServerStarterConfig = {
@@ -200,53 +194,37 @@ type ServerStarterConfig = {
     autoRestarts?: string[];
     shell?: string | string[]
     commands?: Record<string, StarterAction>
-    defaultOutput?: string
+    defaultCommandOutputServer?: string
 };
 
-type ServerStarterExactConfig = {
-    schedules: StarterSchedule[];
-    servers: Record<string, StarterServerExactConfig>;
-    autoStarts: string[];
-    autoRestarts: string[];
-    shell?: string[]
-    commands: Record<string, StarterAction>
-    defaultOutopt?: string
-};
-
-async function readConfigFile(file: string = configFile): Promise<ServerStarterExactConfig | null> {
-    const config: ServerStarterExactConfig = {
-        schedules: [],
-        servers: {},
-        autoStarts: [],
-        autoRestarts: [],
-        commands: {},
-        shell: [],
-    };
+async function readConfigFile(file: string = configFile): Promise<ServerStarterConfig | null> {
+    const config: ServerStarterConfig = { servers: {} };
     try {
         const data = yaml.load(await fs.readFile(file, "utf8")) as any;
-        const { schedules, servers, autoStarts, autoRestarts, shell, commands, defaultOutput } = data as ServerStarterConfig;
+        const { schedules, servers, autoStarts, autoRestarts, shell, commands, defaultCommandOutputServer } = data as ServerStarterConfig;
 
         // verify autoStarts
         if (autoStarts != undefined && !Array.isArray(autoStarts)) {
             throw "autoStarts must be string[]";
         }
-        config.autoRestarts = autoRestarts ?? [];
+        config.autoRestarts = autoRestarts;
 
         // verify autoRestarts
         if (autoRestarts != undefined && !Array.isArray(autoRestarts)) {
             throw "autoRestarts must be string[]";
         }
-        config.autoStarts = autoStarts ?? [];
+        config.autoStarts = autoStarts;
 
         //verify shell
         if (shell != undefined && !(Array.isArray(shell) || typeof shell === "string")) {
             throw "shell must be string or string[]";
         }
-        config.shell = typeof shell === "string" ? [shell] : shell;
+        config.shell = shell;
 
-        if (defaultOutput != undefined && typeof defaultOutput !== "string") {
-            throw "defaultOutput must be string";
+        if (defaultCommandOutputServer!= undefined && typeof defaultCommandOutputServer !== "string") {
+            throw "defaultCommandOutputServer must be string";
         }
+        config.defaultCommandOutputServer = defaultCommandOutputServer;
 
         //verify schedules
         if (schedules != undefined && !Array.isArray(schedules)) {
@@ -261,7 +239,7 @@ async function readConfigFile(file: string = configFile): Promise<ServerStarterE
                 throw `schedules[${index}].action is not string`;
             }
         });
-        config.schedules = schedules ?? [];
+        config.schedules = schedules;
 
         // verify servers
         if (servers != undefined)
@@ -273,7 +251,7 @@ async function readConfigFile(file: string = configFile): Promise<ServerStarterE
                 if (typeof serverInstanceConfig !== "object" || serverInstanceConfig == null) {
                     throw `servers[${name}] is not a valid config`;
                 }
-                const { cwd, "exec-option": execOption, params, isMultiple, stdout, stdin, stopCommand, } = serverInstanceConfig as StarterServerConfig;
+                const { cwd, "exec-option": execOption, params, isMultiple, stdout, stdin, stopCommands } = serverInstanceConfig as StarterServerConfig;
                 if (typeof cwd !== "string" && cwd != undefined) {
                     throw `servers[${name}].cwd must be string`;
                 }
@@ -289,30 +267,21 @@ async function readConfigFile(file: string = configFile): Promise<ServerStarterE
                 if (stdin != undefined && !["use", "ignore"].includes(stdin)) {
                     throw  `servers[${name}].stdin must be "use" or "ignore"`;
                 }
-                if (stopCommand != undefined && !Array.isArray(stopCommand))
+                if (stopCommands != undefined && !Array.isArray(stopCommands))
                     throw `servers[${name}].stopCommand must be array`;
-                if (stopCommand != undefined)
-                stopCommand.forEach((stopCommandItem, index) => {
+                if (stopCommands != undefined)
+                stopCommands.forEach((stopCommandItem, index) => {
                     if (!["mixed", "command", "signal", "kill"].includes(stopCommandItem.type)){
-                        throw `servers[$name}].stopCommand[${index}].type must be "mixed", "command", "signal" or "kill"`;
+                        throw `servers[$name}].stopCommands[${index}].type must be "mixed", "command", "signal" or "kill"`;
                     }
                     if (typeof stopCommandItem.value !== "string" && typeof stopCommandItem.value !== "number") {
-                        throw `servers[$name}].stopCommand[${index}].value must be string, number or NodeJS.Signals`;
+                        throw `servers[$name}].stopCommands[${index}].value must be string, number or NodeJS.Signals`;
                     }
                     if (stopCommandItem.timeoutMs != undefined && typeof stopCommandItem.timeoutMs !== "number") {
-                        throw `servers[$name}].stopCommand[${index}].timeoutMs must be number`;
+                        throw `servers[$name}].stopCommands[${index}].timeoutMs must be number`;
                     }
                 });
-                const serverConfig = {
-                    "exec-option": execOption,
-                    params: Array.isArray(params) ? params.map(p => String(p)) : [params],
-                    isMultiple: isMultiple ?? false,
-                    stdout: stdout ?? "pass",
-                    stdin: stdin ?? "use",
-                    stopCommand: stopCommand ?? [],
-                    cwd: cwd ?? baseDir,
-                };
-                config.servers[name] = serverConfig;
+                (config.servers as Record<string, StarterServerConfig>)[name] = serverInstanceConfig;
             } catch (e) {
                 if (typeof e === "string") {
                     LOGGER.error("服务器配置%s无效：%s", name, e);
@@ -402,7 +371,7 @@ class ServerInstanceConfig {
     #isMultiple: boolean;
     #stdout: "pass" | "use" | "ignore";
     #stdin: "use" | "ignore";
-    #stopCommand: ServerInstanceConfigStopCommand[] = [];
+    #stopCommands: ServerInstanceConfigStopCommand[] = [];
 
     get name() {
         return this.#name;
@@ -425,8 +394,8 @@ class ServerInstanceConfig {
     get stdin() {
         return this.#stdin;
     }
-    get stopCommand() {
-        return this.#stopCommand;
+    get stopCommands() {
+        return this.#stopCommands;
     }
     equals(o: any): boolean {
         if (!(o instanceof ServerInstanceConfig)) {
@@ -438,29 +407,30 @@ class ServerInstanceConfig {
         let myConfig: any;
         let yourConfig: any;
         {
-            const { name, cwd, params, isMultiple, stdout, stdin, execOption, stopCommand } = this;
-            myConfig = { name, cwd, params, isMultiple, stdout, stdin, execOption, stopCommand, };
+            const { name, cwd, params, isMultiple, stdout, stdin, execOption, stopCommands } = this;
+            myConfig = { name, cwd, params, isMultiple, stdout, stdin, execOption, stopCommands, };
         }
         {
-            const { name, cwd, params, isMultiple, stdout, stdin, execOption, stopCommand } = o;
-            yourConfig = { name, cwd, params, isMultiple, stdout, stdin, execOption, stopCommand, };
+            const { name, cwd, params, isMultiple, stdout, stdin, execOption, stopCommands } = o;
+            yourConfig = { name, cwd, params, isMultiple, stdout, stdin, execOption, stopCommands, };
         }
         return lodash.isEqual(myConfig, yourConfig);
     }
-    static addServerConfig(name: string, data: StarterServerExactConfig): ServerConfigID {
+    static addServerConfig(name: string, data: StarterServerConfig): ServerConfigID {
         const id = createID();
         const config = new ServerInstanceConfig();
         config.#name = name;
-        if (path.isAbsolute(data.cwd)) {
+        if (data.cwd != undefined && path.isAbsolute(data.cwd)) {
             config.#cwd = data.cwd;
         } else {
             config.#cwd = path.join(baseDir, data.cwd ?? ".");
         }
-        config.#params = data.params;
-        config.#isMultiple = data.isMultiple;
-        config.#stdout = data.stdout;
-        config.#stdin = data.stdin;
-        config.#execOption = data["exec-option"];
+        config.#params = typeof data.params === "string" ? [data.params] : data.params;
+        config.#isMultiple = data.isMultiple ?? false;
+        config.#stdout = data.stdout ?? "pass";
+        config.#stdin = data.stdin ?? "use";
+        config.#execOption = data["exec-option"] ?? {};
+        config.#stopCommands = data.stopCommands ?? [{ type: "mixed" }];
         const oldConfigID = ServerInstanceConfig.RecordServerConfigNamed.get(name);
         const oldConfig = ServerInstanceConfig.RecordServerConfig.get(oldConfigID as any);
         if (oldConfig?.equals(config)) {
@@ -544,7 +514,7 @@ class ServerInstance {
     async #runStopCommand(status: { isExited: boolean }) {
         await 1; //break
         if (!status.isExited)
-            for (const stopCmd of this.config.stopCommand) {
+            for (const stopCmd of this.config.stopCommands) {
                 if (stopCmd.type === "command" && stopCmd.value != undefined) {
                     this.sendCommand(stopCmd.value as string);
                 } else if (stopCmd.type === "signal") {
@@ -901,22 +871,32 @@ const Commands: Record<string, (args: string[], raw: string) => void> = {
     "+start": (args, raw) => {
         Main.Instance.execAction({
             action: "server-start",
-            value: raw
+            server: raw
         });
     },
     "+forceStop": (args, raw) => {
         Main.Instance.execAction({
             action: "server-stop",
-            value: raw,
+            server: raw,
             forceStop: true
         });
     },
     "+stop": (args, raw) => {
         Main.Instance.execAction({
             action: "server-stop",
-            value: raw,
+            server: raw,
             forceStop: false
         });
+    },
+    "+send": (args, raw) => {
+        const { arg: serverName, subcommand: command } = firstArg(raw) ?? {};
+        if (serverName == null || command == null) {
+            console.log("请输入正确的命令格式：+send <服务器名称> <命令>");
+            return;
+        }
+        const commandClean = command.trim();
+        DEBUG.info("即将向服务器 %s 发送命令：%s", serverName, commandClean);
+        Main.Instance.sendServerCommand(serverName, commandClean);
     },
     "stop": () => {
         Main.Instance.stopScript();
@@ -924,11 +904,19 @@ const Commands: Record<string, (args: string[], raw: string) => void> = {
     "+restart": (args, raw) => {
         Main.Instance.execAction({
             action: "server-restart",
-            value: raw
+            server: raw
         });
     },
     "+reload": () => {
         Main.Instance.reload();
+    },
+    "+output": (args, raw) => {
+        const output = args[0];
+        if (output != null) {
+            Main.Instance.setOutput(output);
+        } else {
+            console.log("当前命令输出为", Main.Instance.commandOutput);
+        }
     },
     "+ps": () => {
         const allServers = [...Main.Instance.serverManager.RecordServers.values()];
@@ -950,23 +938,18 @@ const Commands: Record<string, (args: string[], raw: string) => void> = {
         }
 
         console.log("当前状态：已运行%s，加载了%s个配置，已添加%s个计划任务"
+            + EOL + "当前命令输出：%s"
             + EOL + "服务列表如下："
             + EOL + "%s"
             + EOL + "",
             getUptimeText(),
             ServerInstanceConfig.RecordServerConfig.size,
             Main.Instance.ListSchedules.size,
+            Main.Instance.commandOutput ?? "<未定义>",
             serverListTextLines.join(EOL)
         );
     },
 };
-
-class ServerOutputManager {
-    #output: string | null = null;
-    constructor(main: Main) {
-        
-    }
-}
 
 class ServerManager {
     ListLoadedServers = new Set<Server>();
@@ -989,29 +972,26 @@ class ServerManager {
             }
         }
     }
-    async sendSignalToServer(serverName: string, signal: NodeJS.Signals | number) {
-        const serverConfig = ServerInstanceConfig.getNamedConfig(serverName);
-        const allServers: Server[] = [];
-        if (serverConfig != undefined) {
-            for (const server of this.RecordServers.values()) {
-                if (server.config.name == serverName) {
-                    allServers.push(server);
+    async sendSignalToServer(serverName: string, signal: NodeJS.Signals | number, serverIndex?: number) {
+        const serverConfig = this.findRelaventInstanceConfig(serverName) as ServerInstanceConfig;
+        const allServers = this.findServers(serverName);
+        if (allServers.length > 1 && serverIndex == undefined) {
+            this.logger.info("服务器 %s 有多个实例，将会向所有实例发送信号", serverName);
+        }
+        if (serverIndex == undefined) {
+            for (const server of allServers) {
+                if (server.isRunning()) {
+                    server.instance?.serverProcess.kill(signal);
                 }
             }
         } else {
-            const firstServer = this.RecordServers.get(serverName);
-            if (firstServer != undefined) {
-                allServers.push(firstServer);
-            }
-        }
-        if (allServers.length === 0) {
-            this.logger.error("指定的服务器不存在：%s", serverName);
-            return;
-        }
-
-        for (const server of allServers) {
-            if (server.isRunning()) {
-                server.instance?.serverProcess.kill(signal);
+            const server = allServers[serverIndex];
+            if (server == undefined) {
+                this.logger.error("未找到服务器 %s 的第 %s 个实例", serverName, serverIndex + 1);
+            } else {
+                if (server.isRunning()) {
+                    server.instance?.serverProcess.kill(signal);
+                }
             }
         }
     }
@@ -1036,7 +1016,7 @@ class ServerManager {
      * @returns 返回与给定的名字关联的所有服务器
      * @throws 如果设置`slientError`为`false`并且没有找到任何服务器，则抛出TypeError以表示未能找到服务器。
      */
-    findServers(serverName: string, slientError: boolean = false): Server[] {
+    findServers(serverName: string, slientError?: boolean): Server[] {
         let serverConfig: ServerInstanceConfig | undefined = ServerInstanceConfig.getNamedConfig(serverName);
         const allServers: Server[] = [];
         if (serverConfig != undefined) {
@@ -1052,27 +1032,43 @@ class ServerManager {
                 serverConfig = server.latestInstanceConfig;
             }
         }
-        if (serverConfig == undefined && !slientError) {
+        if (serverConfig == undefined && slientError == undefined) {
             this.logger.warn("无法找到服务器 %s：", serverName, new TypeError("no config match to " + serverName));
+        } else if (serverConfig == undefined && slientError === false) {
+            throw new TypeError("no config match to " + serverName);
         }
         return allServers;
     }
-    async stopServer(serverName: string, force: boolean = false) {
+    async stopServer(serverName: string, force: boolean = false, serverIndex?: number) {
         const allServers = this.findServers(serverName);
         const serverConfig = this.findRelaventInstanceConfig(serverName) as ServerInstanceConfig;
 
-        if (allServers.length > 1) {
+        if (allServers.length > 1 && serverIndex == undefined) {
             this.logger.info("服务器 %s 有多个实例，将会停止所有实例", serverName);
         } else if (allServers.length === 1){
             this.logger.info("正在关闭服务器 %s", serverName)
         }
-        for (const server of allServers) {
-            if (force) {
-                this.logger.info("正在强行停止服务器 %s", server.name);
-            } else {
-                this.logger.info("正在关闭服务器 %s", server.name);
+        if (serverIndex == undefined) {
+            for (const server of allServers) {
+                if (force) {
+                    this.logger.info("正在强行停止服务器 %s", server.name);
+                } else {
+                    this.logger.info("正在关闭服务器 %s", server.name);
+                }
+                await server.stop(force);
             }
-            await server.stop(force);
+        } else {
+            const server = allServers[serverIndex];
+            if (server == undefined) {
+                this.logger.error("未找到服务器 %s 的第 %s 个实例", serverName, serverIndex + 1);
+            } else {
+                if (force) {
+                    this.logger.info("正在强行停止服务器 %s", server.name);
+                } else {
+                    this.logger.info("正在关闭服务器 %s", server.name);
+                }
+                await server.stop(force);
+            }
         }
         if (allServers.length > 1 && serverConfig.isMultiple) {
             await 1; // break
@@ -1085,17 +1081,26 @@ class ServerManager {
             }
         }
     }
-    async restartServer(serverName: string) {
+    async restartServer(serverName: string, serverIndex?: number): Promise<void> {
         const serverConfig = this.findRelaventInstanceConfig(serverName) as ServerInstanceConfig;
         const allServers = this.findServers(serverName);
-        if (allServers.length > 1) {
+        if (allServers.length > 1 && serverIndex == undefined) {
             this.logger.info("服务器 %s 有多个实例，将会重启所有实例", serverName);
         }
-        for (const server of allServers) {
-            await server.restart();
+        if (serverIndex == undefined) {
+            for (const server of allServers) {
+                await server.restart();
+            }
+        } else {
+            const server = allServers[serverIndex];
+            if (server == undefined) {
+                this.logger.error("未找到服务器 %s 的第 %s 个实例", serverName, serverIndex + 1);
+            } else {
+                await server.restart();
+            }
         }
     }
-    async startServer(serverName: string): Promise<boolean> {
+    async startServer(serverName: string, serverIndex?: number): Promise<boolean> {
         const serverConfig = ServerInstanceConfig.getNamedConfig(serverName);
         if (serverConfig == undefined) {
             this.logger.error("指定的服务器不存在：%s", serverName);
@@ -1129,19 +1134,6 @@ class ServerManager {
             return await firstInactiveServer.start();
         }
     }
-    async sendServerCommand(serverName: string, command: string) {
-        const servers = this.findServers(serverName);
-        if (servers.length !== 1) {
-            this.logger.error("服务器 %s 有 %d 个实例，无法确定要发送命令的服务器", serverName, servers.length);
-            return;
-        }
-        const server = servers[0];
-        if (server.isRunning()) {
-            server.instance?.sendCommand(command);
-        } else {
-            this.logger.error("服务器 %s 未运行，无法发送命令", serverName);
-        }
-    }
     createServerCopy(name: string): Server {
         const server = [...this.RecordServers.values()].find(s => s.config.name === name);
         if (server == undefined) {
@@ -1167,10 +1159,10 @@ class Main {
     logger = LOGGER;
     static Instance: Main = null as any;
     serverManager: ServerManager;
-    serverOutputManager: ServerOutputManager;
     ListSchedules = new Set<ScheduledTask>();
+    commandOutput: string | null = null;
+    defaultCommandOutput: string | null = null;
     constructor() {
-        this.serverOutputManager = new ServerOutputManager(this);
         this.serverManager = new ServerManager(this);
     }
 
@@ -1193,9 +1185,43 @@ class Main {
         } else {
             this.logger.error("无法识别的命令：", cmd);
         }
+        if (this.isOutputAvailable()) {
+            this.sendServerCommand(this.commandOutput as string, cmd);
+        } else {
+            this.logger.warn("命令输出不可用");
+            if (this.defaultCommandOutput != null && this.isOutputAvailable(this.defaultCommandOutput)) {
+                this.logger.info("默认输出已切换到服务器 %s", this.defaultCommandOutput);
+            }
+        }
     }
-
-
+    setOutput(serverName: string, chooseFirst: boolean = false) {
+        const servers = this.serverManager.findServers(serverName);
+        if (servers.length !== 1 && !chooseFirst) {
+            this.logger.error("服务器 %s 有 %d 个实例，无法确定要发送命令的服务器", serverName, servers.length);
+            return;
+        }
+        const server = servers[0];
+        if (server.config.instanceConfig.stdin !== "use") {
+            this.logger.error("服务器 %s 未配置 stdin 为 use，无法发送命令", server.name);
+            return false;
+        }
+        this.commandOutput = server.name;
+        this.logger.info("已将命令输出切换到服务器 %s", server.name);
+    }
+    isOutputAvailable(output = this.commandOutput): boolean {
+        if (output == null) {
+            return false;
+        }
+        const servers = this.serverManager.findServers(output, true);
+        if (servers.length !== 1) {
+            return false;
+        }
+        const server = servers[0];
+        if (server.config.instanceConfig.stdin !== "use") {
+            return false;
+        }
+        return server.isRunning();
+    }
     async startScript() {
         this.logger.info("启动程序中");
         this.#readline = readline.createInterface({
@@ -1283,6 +1309,7 @@ class Main {
         }
 
         // apply autoRestarts
+        if (starterConfig.autoRestarts != undefined)
         for (const [name, server] of this.serverManager.RecordServers) {
 
             if (!(this.serverManager.ListLoadedServers.has(server)) && !server.isActive()) {
@@ -1297,23 +1324,29 @@ class Main {
         }
 
         if (starterConfig.shell != undefined)
-            this.shell = starterConfig.shell;
+            this.shell = typeof starterConfig.shell === "string" ? [starterConfig.shell] : starterConfig.shell;
         else
             this.shell = ["/bin/bash"];
 
-        this.autoStarts = starterConfig.autoStarts;
+        this.autoStarts = starterConfig.autoStarts ?? [];
+        this.defaultCommandOutput = starterConfig.defaultCommandOutputServer ?? null;
 
         // clean old schedules
         this.ListSchedules.forEach(task => task.stop());
         this.ListSchedules.clear();
 
         // load shcedule config
+        if (starterConfig.schedules != undefined)
         for (const schedule of starterConfig.schedules) {
             const task = cron.schedule(schedule.cron, () => {
                 this.runSchedule(schedule);
             });
             this.ListSchedules.add(task);
             result.scheduleCount++;
+        }
+
+        if (!this.isOutputAvailable() && this.defaultCommandOutput != null) {
+            this.setOutput(this.defaultCommandOutput);
         }
 
         DEBUG.debug(this);
@@ -1364,7 +1397,7 @@ class Main {
             const cmdServerConfigName = `schedule$${createID(6)}`;
             const cmdServerConfigId = ServerInstanceConfig.addServerConfig(cmdServerConfigName, {
                 params: [],
-                stopCommand: [{ type: "mixed" }],
+                stopCommands: [{ type: "mixed" }],
                 stdin: "use",
                 stdout: "pass",
                 cwd: ".",
@@ -1394,18 +1427,48 @@ class Main {
                 });
             });
         } else if (action.action === "server-start") {
-            this.serverManager.startServer(action.value);
+            this.serverManager.startServer(action.server, action.serverIndex);
         } else if (action.action === "server-stop") {
-            this.serverManager.stopServer(action.value, action.forceStop);
+            this.serverManager.stopServer(action.server, action.forceStop, action.serverIndex);
         } else if (action.action === "server-restart") {
-            this.serverManager.restartServer(action.value);
+            this.serverManager.restartServer(action.server, action.serverIndex);
         } else if (action.action === "server-kill") {
-            this.serverManager.sendSignalToServer(action.value, action.signal);
+            this.serverManager.sendSignalToServer(action.server, action.value, action.serverIndex);
+        } else if (action.action === "server-command") {
+            this.sendServerCommand(action.server, action.server, action.serverIndex);
         } else if (action.action === "stop-all-server") {
             this.serverManager.stopAllServer();
         } else if (action.action === "start-auto-starts-server") {
             await this.startAutoStartsServers();
         }
+    }
+    sendServerCommand(serverName: string, command: string, serverIndex?: number): boolean {
+        const serverConfig = this.serverManager.findRelaventInstanceConfig(serverName) as ServerInstanceConfig;
+        const allServers = this.serverManager.findServers(serverName);
+        if (allServers.length > 1 && serverIndex == undefined) {
+            this.logger.error("服务器 %s 有 %d 个实例，无法确定要发送命令的服务器", serverName, allServers.length);
+            return false;
+        }
+        let server: Server | undefined;
+        if (serverIndex == undefined) {
+            server = allServers[0];
+        } else {
+            server = allServers[serverIndex];
+            if (server == undefined) {
+                this.logger.error("未找到服务器 %s 的第 %s 个实例", serverName, serverIndex + 1);
+                return false;
+            }
+        }
+        if (server.config.instanceConfig.stdin !== "use") {
+            this.logger.error("服务器 %s 未配置 stdin 为 use，无法发送命令", server.name);
+            return false;
+        }
+        if (!server.isRunning()) {
+            this.logger.error("服务器 %s 未运行，无法发送命令", serverName);
+            return false;
+        }
+        const instance = server.instance as ServerInstance;
+        return instance.sendCommand(command);
     }
     
 }

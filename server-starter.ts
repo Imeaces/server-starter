@@ -768,7 +768,10 @@ class Server {
         if (this.#instance != null || !this.config.autoRestart) {
             return;
         }
-        if (this.#isStopped){
+        if (this.#isStopped || !this.#isActive){
+           if (unlock != undefined){
+              unlock();
+           }
            return;
         }
         if (unlock == undefined) {
@@ -821,15 +824,12 @@ class Server {
             this.#restartLock.unlock();
         }
         const unlock = await this.#restartLock.lock();
+        this.#isStopped = true;
         let result = await this._stopProcess(forceStop);
         unlock();
-        if (result){
-            this.#isStopped = true;
-        }
         if (forceStop) {
             this.#isActive = false;
             result = true;
-            this.#isStopped = true;
         }
         return result;
     }
@@ -1388,7 +1388,7 @@ class Main {
                     continue;
                 }
                 if (await server.start()) {
-                    await timeWait(1000);
+                    await timeWait(10 * 1000);
                 } else {
                     this.logger.error("自动启动服务器失败：", serverName);
                     continue loopStarts;

@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 import yaml, { Type } from "js-yaml";
 import lodash from "lodash";
 import log4js, { Logger } from "log4js";
@@ -18,46 +16,36 @@ process.on("exit", () => {
 
 const LOGGER = log4js.getLogger("server-starter");
 const DEBUG = log4js.getLogger("server-starter-debug");
-LOGGER.level = log4js.levels.INFO;
-DEBUG.level = log4js.levels.OFF;
 
-log4js.configure({
+const log4jsConfiguration = {
     appenders: {
-        stdout: { type: "stdout" },
-        stderr: { type: "stderr" },
-        logfile: {
+        console: { type: "stderr" },
+        debugLogFile: {
+            type: "file",
+            filename: "starterLogs/debug.log",
+            backups: 0,
+            maxLogSize: "10M",
+        },
+        logFile: {
             type: "file",
             filename: "starterLogs/latest.log",
-            maxLogSize: 32768,
+            maxLogSize: "100K",
             backups: 200,
-            compress: true
+            compress: true,
         },
-        defaultOut: {
-            type: "logLevelFilter",
-            level: "trace",
-            appender: "stdout",
-            maxLevel: "warn"
-        },
-        defaultErr: {
-            type: "logLevelFilter",
-            level: "error",
-            appender: "stderr"
-        },
-        noLog: {
-            type: "noLogFilter"
-        }
     },
     categories: {
         default: {
-            appenders: ["defaultOut", "defaultErr", "logfile"],
-            level: "trace"
+            level: "info",
+            appenders: ["logFile", "console"],
         },
-        noLog: {
+        "server-starter-debug": {
             level: "off",
-            appenders: ["noLog"],
+            appenders: ["logFile"],
         }
     }
-});
+};
+
 let configFile = "server-starter.yml";
 let baseDir = ".";
 
@@ -82,14 +70,20 @@ function main() {
             }
         } else if (arg === "--debug" || arg === "-v") {
             console.info("[server-starter] 启用详细日志")
-            LOGGER.level = log4js.levels.TRACE;
-            DEBUG.level = log4js.levels.TRACE;
+
+            log4jsConfiguration.categories["server-starter-debug"].level = "trace";
+            log4jsConfiguration.categories["server-starter-debug"].appenders.push("debugLogFile", "console");
+            log4jsConfiguration.categories["default"].level = "trace";
+            log4jsConfiguration.categories["default"].appenders.push("debugLogFile");
+            
         } else {
             console.error("unknown arg: %s", arg);
             process.exit(2);
             throw new Error();
         }
+
     }
+    log4js.configure(log4jsConfiguration);
     LOGGER.info("baseDir: %s，configFile：%s", baseDir, configFile);
     Main.Instance.startScript();
     const stopCallback = () => {
@@ -1250,6 +1244,10 @@ class Main {
             await serverInstance.forceStop();
         }
         this.logger.info("程序已结束");
+        try {
+           log4js.shutdown();
+        } catch {
+        }
         process.exit(0);
     }
 

@@ -863,33 +863,33 @@ class Server {
     }
 }
 
-const Commands: Record<string, (args: string[], raw: string) => void> = {
-    "+debug": () => {
-        LOGGER.info("ServerInstance", ServerInstance);
-        LOGGER.info("ServerInstanceConfig", ServerInstanceConfig);
-        LOGGER.info("Main", Main.Instance);
+const Commands: Record<string, (this: Main, args: string[], raw: string) => void> = {
+    "+debug": function(){
+        this.logger.info("ServerInstance", ServerInstance);
+        this.logger.info("ServerInstanceConfig", ServerInstanceConfig);
+        this.logger.info("Main", Main.Instance);
     },
-    "+start": (args, raw) => {
-        Main.Instance.execAction({
+    "+start": function (args, raw){
+        this.execAction({
             action: "server-start",
             server: raw
         });
     },
-    "+forceStop": (args, raw) => {
-        Main.Instance.execAction({
+    "+forceStop": function(args, raw){
+        this.execAction({
             action: "server-stop",
             server: raw,
             forceStop: true
         });
     },
-    "+stop": (args, raw) => {
-        Main.Instance.execAction({
+    "+stop": function(args, raw){
+        this.execAction({
             action: "server-stop",
             server: raw,
             forceStop: false
         });
     },
-    "+send": (args, raw) => {
+    "+send": function(args, raw) {
         const { arg: serverName, subcommand: command } = firstArg(raw) ?? {};
         if (serverName == null || command == null) {
             console.log("请输入正确的命令格式：+send <服务器名称> <命令>");
@@ -897,35 +897,35 @@ const Commands: Record<string, (args: string[], raw: string) => void> = {
         }
         const commandClean = command.trim();
         DEBUG.info("即将向服务器 %s 发送命令：%s", serverName, commandClean);
-        Main.Instance.sendServerCommand(serverName, commandClean);
+        this.sendServerCommand(serverName, commandClean);
     },
-    "stop": () => {
-        Main.Instance.stopScript();
+    "stop": function() {
+        this.stopScript();
     },
-    "+restart": (args, raw) => {
-        Main.Instance.execAction({
+    "+restart": function(args, raw) {
+        this.execAction({
             action: "server-restart",
             server: raw
         });
     },
-    "+reload": () => {
-        Main.Instance.reload();
+    "+reload": function(){
+        this.reload();
     },
-    "+output": (args, raw) => {
+    "+output": function(args, raw) {
         const output = args[0];
         if (output != null) {
-            Main.Instance.setOutput(output);
+            this.setOutput(output);
         } else {
-            console.log("当前命令输出为", Main.Instance.commandOutput);
+            console.log("当前命令输出为", this.commandOutput);
         }
     },
-    "+ps": () => {
-        const allServers = [...Main.Instance.serverManager.RecordServers.values()];
+    "+ps": function() {
+        const allServers = [...this.serverManager.RecordServers.values()];
         console.log("已经加载了下列服务：", allServers.map(server => server.name).join(" "));
         console.log("正在运行下列服务：", allServers.filter(server => server.isRunning()).map(server => server.name).join(" "));
     },
-    "+status": () => {
-        const allServers = [...Main.Instance.serverManager.RecordServers.values()];
+    "+status": function() {
+        const allServers = [...this.serverManager.RecordServers.values()];
         const runningServers = allServers.filter(server => server.isRunning());
         const activeServers = allServers.filter(server => server.isActive());
         const inactiveServers = allServers.filter(server => !server.isActive());
@@ -945,8 +945,8 @@ const Commands: Record<string, (args: string[], raw: string) => void> = {
             + EOL + "",
             getUptimeText(),
             ServerInstanceConfig.RecordServerConfig.size,
-            Main.Instance.ListSchedules.size,
-            Main.Instance.commandOutput ?? "<未定义>",
+            this.ListSchedules.size,
+            this.commandOutput ?? "<未定义>",
             serverListTextLines.join(EOL)
         );
     },
@@ -1183,8 +1183,13 @@ class Main {
             args.push(ap.arg);
             ap = firstArg(ap.subcommand);
         }
-        if (Commands[p0] != null) {
-            Commands[p0](args, s.trim());
+        if (p0.startsWith("+") || Commands[p0] != null) {
+            const exec = Commands[p0];
+            if (exec != undefined){
+               exec.call(this, args, s.trim());
+            } else {
+               this.logger.error("未找到命令", cmd);
+            }
         } else {
             if (this.isOutputAvailable()) {
                 this.sendServerCommand(this.commandOutput as string, cmd);

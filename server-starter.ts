@@ -550,9 +550,16 @@ class ServerInstance {
         }
         const status = { isExited: false };
         await new Promise<void>(resolve => {
+            const timeout = setTimeout(() => {
+                this.logger.warn("服务器进程超时，正在强制关闭服务器进程...");
+                this.#serverProcess.kill("SIGKILL");
+                resolve();
+                status.isExited = true;
+            }, 6 * 60 * 1000);
             this.serverProcess.on("exit", () => {
                 resolve();
                 status.isExited = true;
+                clearTimeout(timeout);
             });
 
             if (forceStop) {

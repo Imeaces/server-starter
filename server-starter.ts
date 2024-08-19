@@ -7,6 +7,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
 import { EOL } from "node:os";
+import { EventEmitter } from "node:stream";
 
 process.on("exit", () => {
     DEBUG.debug("ServerInstance", ServerInstance);
@@ -480,7 +481,7 @@ class ServerInstanceConfig {
     static RecordServerConfig: Map<ServerConfigID, ServerInstanceConfig> = new Map();
 }
 
-class ServerInstance {
+class ServerInstance extends EventEmitter {
     #logger: log4js.Logger;
     #id: ServerInstanceID;
     #config: ServerInstanceConfig;
@@ -510,6 +511,7 @@ class ServerInstance {
     }
 
     constructor(id: ServerInstanceID, config: ServerInstanceConfig) {
+        super();
         this.#id = id;
         this.#config = config;
         this.#logger = log4js.getLogger(config.name);
@@ -682,11 +684,18 @@ class ServerInstance {
         this.logger.trace("process quit: %s, status: %s", this.serverProcess.pid, code ?? signal);
         ServerInstance.RecordServerRunning.delete(this.id);
         this.#isRunning = false;
+        this.emit("stopped", code, signal);
     }
     /**
      * 正在运行的服务器进程
      */
     static RecordServerRunning = new Map<ServerInstanceID, ServerInstance>();
+}
+
+interface ServerInstance {
+    on(event: "stopped", listener: (code: number | null, signal: NodeJS.Signals | null) => void): any;
+    off(event: "stopped", listener: (code: number | null, signal: NodeJS.Signals | null) => void): any;
+    once(event: "stopped", listener: (code: number | null, signal: NodeJS.Signals | null) => void): any;
 }
 
 type ServerConfig = {
@@ -697,9 +706,14 @@ type ServerConfig = {
 
 class Server {
     readonly id: ServerRunID = createID(5);
-    #isStopped = true;
+    #isActive: boolean = false;
     #instance: ServerInstance | null = null;
     #config: ServerConfig;
+    #latestInstanceConfig: ServerInstanceConfig | null = null;
+    #logger: Logger;
+    #instanceOperationLock = new Lock(true);
+    #crashRestartTimeLimit = new RestartLimit({ maxTimes: 5, interval: 10 * 60 * 1000 });
+
     get instance(): ServerInstance | null {
         return this.#instance;
     }
@@ -719,29 +733,26 @@ class Server {
         }
         return name;
     }
-    #logger: Logger;
 
     constructor(config: ServerConfig) {
         this.#config = config;
         this.#logger = log4js.getLogger(this.name);
     }
-    #restartLock = new Lock(true);
-    #crashRestartTimeLimit = new RestartLimit({ maxTimes: 5, interval: 10 * 60 * 1000 });
-    #isActive: boolean = false;
 
     /**
-     * 检查服务器是否仍在活跃
+     * 检查服务器是否仍在活跃。
+     * 如果仍有在运行的服务器进程，或者仍有在运行的操作，则返回`true`，否则返回`false`
      */
-    isActive(): boolean {
+    isServerActive(): boolean {
         return this.#isActive;
     }
     /**
      * 检查服务器进程是否正在运行
      */
-    isRunning(): boolean {
+    isInstanceRunning(): boolean {
         return this.#instance?.isRunning ?? false;
     }
-    #latestInstanceConfig: ServerInstanceConfig | null = null;
+
     /**
      * 获取最新的配置
      */
@@ -754,7 +765,7 @@ class Server {
             return;
         }
         // 服务器未在运行，直接替换配置
-        if (!this.isRunning()) {
+        if (!this.isInstanceRunning()) {
             this.config.instanceConfig = config;
             this.#logger.info("服务器配置已更新");
         }
@@ -762,124 +773,127 @@ class Server {
         // 更新服务器配置
         this.#latestInstanceConfig = config;
     }
-    async #onExit(instance: ServerInstance, code: null | number, signal: null | NodeJS.Signals) {
+    async #onInstanceStopped(instance: ServerInstance, code: null | number, signal: null | NodeJS.Signals) {
         if (this.#instance === instance) {
             this.#instance = null;
-        }
-        const processName = String(instance.serverProcess.pid ?? "");
-        this.#logger.info("服务器进程%s已退出，%s：%s", processName, code == null ? "信号" : "状态", code ?? signal);
-        if (this.config.autoRestart) {
-            this.#doAutoRestart();
-        } else {
-            this.#isActive = false;
-        }
-    }
-    async #doAutoRestart(unlock?: () => void) {
-        if (this.#instance != null || !this.config.autoRestart) {
+        } else { // 一般这种情况不应该发生
+            this.#logger.error("服务器进程%s已退出，但服务器实例不是当前服务器实例，忽略", instance.serverProcess.pid ?? "<unknown>");
             return;
         }
-        if (this.#isStopped || !this.#isActive){
-           if (unlock != undefined){
-              unlock();
-           }
-           return;
+        const processName = String(instance.serverProcess.pid);
+        this.#logger.info("服务器进程%s已退出，%s：%s", processName, code == null ? "信号" : "状态", code ?? signal);
+        this.#doAutoRestart();
+    }
+    async #doAutoRestart() {
+        if (this.isInstanceRunning() || !this.config.autoRestart || !this.#isActive) {
+            return;
         }
-        if (unlock == undefined) {
-            unlock = await this.#restartLock.lock();
+        const handle = await this.#instanceOperationLock.lock();
+        if (this.isInstanceRunning() || !this.config.autoRestart || !this.#isActive) {
+            handle();
+            return;
         }
         if (this.#crashRestartTimeLimit.next()) {
-            this.#logger.warn("服务器崩溃自动重启的次数过多，稍后再尝试重新启动");
-            this.#timeoutIdCrashRestart = setTimeout(() => {
-                this.#doAutoRestart(unlock);
+            this.#logger.warn("服务器崩溃自动重启的频率过多，稍后再尝试重新启动");
+            setTimeout(() => {
+                this.#doAutoRestart();
             }, this.#crashRestartTimeLimit.interval);
+            handle();
             return;
         }
         this.#logger.warn("服务器异常退出，尝试重新启动");
-        await this._startProcess();
-        unlock();
+
+        if (!(await this.#startProcess())){
+            this.#doAutoRestart();
+        }
+        handle();
     }
     /**
      * 启动服务器
+     * @returns 表示操作是否成功（不代表服务器是否已经启动）
      */
     async start(): Promise<boolean> {
-        if (this.isRunning()) {
+        if (this.isInstanceRunning()) {
+            return false;
+        }
+        const handle = await this.#instanceOperationLock.lock();
+        if (this.isInstanceRunning()) {
+            handle();
             return false;
         }
         this.#isActive = true;
-        const unlock = await this.#restartLock.lock();
         this.updateInstanceConfig();
-        const isSucceed = await this._startProcess();
-        unlock();
-        if (!isSucceed) {
-            if (this.config.autoRestart) {
-                this.#doAutoRestart();
-            } else {
-                this.#isActive = false;
-            }
-        } else {
-           this.#isStopped = false;
+        const result = await this.#startProcess();
+        if (!this.isInstanceRunning()) {
+            this.#doAutoRestart();
         }
-        return isSucceed;
-    }
-    #timeoutIdCrashRestart: NodeJS.Timeout | null = null;
-    /**
-     * 关闭服务器
-     */
-    async stop(forceStop = false): Promise<boolean> {
-        if (forceStop) {
-            if (this.#timeoutIdCrashRestart != null) {
-                clearTimeout(this.#timeoutIdCrashRestart);
-                this.#timeoutIdCrashRestart = null;
-            }
-            this.#restartLock.unlock();
-        }
-        const unlock = await this.#restartLock.lock();
-        this.#isStopped = true;
-        let result = await this._stopProcess(forceStop);
-        unlock();
-        if (forceStop) {
-            this.#isActive = false;
-            result = true;
-        }
+        handle();
         return result;
     }
     async forceStop() {
-        return this.stop(true);
+        this.#isActive = false;
+        await this.#stopProcess(true);
+        this.#instanceOperationLock.unlock();
+        this.#instance = null;
+        this.updateInstanceConfig();
     }
     /**
-     * 运行新的服务器进程
+     * 关闭服务器
+     * @returns 表示操作是否成功（不代表服务器是否已经停止）
      */
-    async _startProcess() {
-        const instance = await ServerInstance.createServerInstance(this.name, this.config.instanceConfig);
-        if (instance == null) {
+    async stop(forceStop = false): Promise<boolean> {
+        if (forceStop) {
+            this.forceStop();
+            return true;
+        }
+        if (!this.isInstanceRunning()) {
             return false;
         }
-        this.#logger.info("已创建新的服务器进程，PID：%s", instance.serverProcess.pid);
-        this.#instance = instance;
-        instance.serverProcess.on("exit", (code, signal) => {
-            this.#onExit(instance, code, signal);
-        });
-        return true;
-    }
-    /**
-     * 关闭服务器进程
-     */
-    async _stopProcess(forceStop = false): Promise<boolean> {
-        let result: boolean = false;
-        if (this.instance != null) {
-            result = await this.instance.stop(forceStop);
-            await 1; //break
+        const handle = await this.#instanceOperationLock.lock();
+        if (!this.isInstanceRunning()) {
+            handle();
+            return false;
         }
+        this.#isActive = false;
+        const result = await this.#stopProcess(false);
+        handle();
         return result;
     }
     /**
      * 重新启动服务器
      */
     async restart() {
-        const handle = await this.#restartLock.lock();
-        await this._stopProcess();
-        await this._startProcess();
+        const handle = await this.#instanceOperationLock.lock();
+        this.#isActive = true;
+        await this.#stopProcess();
+        await this.#stopProcess(true);
+        await this.#startProcess();
         handle();
+    }
+    /**
+     * 运行新的服务器进程
+     */
+    async #startProcess() {
+        const instance = await ServerInstance.createServerInstance(this.name, this.config.instanceConfig);
+        if (instance == null) {
+            return false;
+        }
+        this.#logger.info("已创建新的服务器进程，PID：%s", instance.serverProcess.pid);
+        this.#instance = instance;
+        instance.once("stopped", (code, signal) => {
+            this.#onInstanceStopped(instance, code, signal);
+        });
+        return true;
+    }
+    /**
+     * 关闭服务器进程
+     */
+    async #stopProcess(forceStop = false): Promise<boolean> {
+        let result: boolean = false;
+        if (this.instance != null) {
+            result = await this.instance.stop(forceStop);
+        }
+        return result;
     }
 }
 
@@ -942,18 +956,18 @@ const Commands: Record<string, (this: Main, args: string[], raw: string) => void
     "+ps": function() {
         const allServers = [...this.serverManager.RecordServers.values()];
         console.log("已经加载了下列服务：", allServers.map(server => server.name).join(" "));
-        console.log("正在运行下列服务：", allServers.filter(server => server.isRunning()).map(server => server.name).join(" "));
+        console.log("正在运行下列服务：", allServers.filter(server => server.isInstanceRunning()).map(server => server.name).join(" "));
     },
     "+status": function() {
         const allServers = [...this.serverManager.RecordServers.values()];
-        const runningServers = allServers.filter(server => server.isRunning());
-        const activeServers = allServers.filter(server => server.isActive());
-        const inactiveServers = allServers.filter(server => !server.isActive());
+        const runningServers = allServers.filter(server => server.isInstanceRunning());
+        const activeServers = allServers.filter(server => server.isServerActive());
+        const inactiveServers = allServers.filter(server => !server.isServerActive());
         const outdateServers = allServers.filter(server => !server.latestInstanceConfig.equals(server.config));
 
         const serverListTextLines = ["Server Status Config"];
         for (const server of allServers.toSorted((a, b) => a.name < b.name ? 1 : a.name === b.name ? 0 : -1)) {
-            const status = server.isRunning() ? "running" : server.isActive() ? "active" : "stopped";
+            const status = server.isInstanceRunning() ? "running" : server.isServerActive() ? "active" : "stopped";
             const configStatus = server.config.instanceConfig.equals(server.latestInstanceConfig) ? "normal" : "outdated";
             serverListTextLines.push(`${server.name} ${status} ${configStatus}`);
         }
@@ -988,7 +1002,7 @@ class ServerManager {
             await this.stopServer(serverName);
         }
         for (const server of this.RecordServers.values()) {
-            if (server.isRunning()) {
+            if (server.isInstanceRunning()) {
                 await this.stopServer(server.name);
             }
         }
@@ -1001,7 +1015,7 @@ class ServerManager {
         }
         if (serverIndex == undefined) {
             for (const server of allServers) {
-                if (server.isRunning()) {
+                if (server.isInstanceRunning()) {
                     server.instance?.serverProcess.kill(signal);
                 }
             }
@@ -1010,7 +1024,7 @@ class ServerManager {
             if (server == undefined) {
                 this.logger.error("未找到服务器 %s 的第 %s 个实例", serverName, serverIndex + 1);
             } else {
-                if (server.isRunning()) {
+                if (server.isInstanceRunning()) {
                     server.instance?.serverProcess.kill(signal);
                 }
             }
@@ -1069,7 +1083,7 @@ class ServerManager {
         }
         if (serverIndex == undefined) {
             for (const server of allServers) {
-                if (!server.isRunning() && !force) {
+                if (!server.isInstanceRunning() && !force) {
                     this.logger.warn("不对服务器进行关闭操作，因为服务器未在运行");
                     continue;
                 }
@@ -1084,7 +1098,7 @@ class ServerManager {
             const server = allServers[serverIndex];
             if (server == undefined) {
                 this.logger.error("未找到服务器 %s 的第 %s 个实例", serverName, serverIndex + 1);
-            } else if (server.isRunning()){
+            } else if (server.isInstanceRunning()){
                 if (force) {
                     this.logger.info("正在强行停止服务器 %s", server.name);
                 } else {
@@ -1096,7 +1110,7 @@ class ServerManager {
         if (allServers.length > 1 && serverConfig.isMultiple) {
             await 1; // break
             for (const server of allServers.slice(1)) {
-                if (server.isActive()) {
+                if (server.isServerActive()) {
                     continue;
                 }
                 this.RecordServers.delete(server.name);
@@ -1133,14 +1147,14 @@ class ServerManager {
         if (!serverConfig.isMultiple && allServers.length > 1) {
             this.logger.error("指定的服务器未启用多实例，但是找到了多条服务器信息：%s", serverName);
             return false;
-        } else if (!serverConfig.isMultiple && allServers.length === 1 && allServers[0].isRunning()) {
+        } else if (!serverConfig.isMultiple && allServers.length === 1 && allServers[0].isInstanceRunning()) {
             this.logger.warn("服务器 %s 已在运行中，不会启动新的实例", serverName);
             return false;
         } else if (!serverConfig.isMultiple && allServers.length === 0) {
             this.logger.error("服务器配置未初始化: " + serverName);
             return false;
         }
-        let firstInactiveServer: Server | undefined = allServers.find(server => !server.isActive());
+        let firstInactiveServer: Server | undefined = allServers.find(server => !server.isServerActive());
         if (firstInactiveServer == undefined) {
             if (serverConfig.isMultiple) {
                 this.logger.info("为 %s 初始化新的服务器", serverName);
@@ -1150,7 +1164,7 @@ class ServerManager {
                 firstInactiveServer = allServers[0];
             }
         }
-        if (firstInactiveServer.isActive()) {
+        if (firstInactiveServer.isServerActive()) {
             this.logger.error("无法启动服务器 %s，服务器正忙于特定操作", firstInactiveServer.name);
             return false;
         } else {
@@ -1247,7 +1261,7 @@ class Main {
         if (server.config.instanceConfig.stdin !== "use") {
             return false;
         }
-        return server.isRunning();
+        return server.isInstanceRunning();
     }
     async startScript() {
         this.logger.info("启动程序中");
@@ -1343,7 +1357,7 @@ class Main {
         if (starterConfig.autoRestarts != undefined)
         for (const [name, server] of this.serverManager.RecordServers) {
 
-            if (!(this.serverManager.ListLoadedServers.has(server)) && !server.isActive()) {
+            if (!(this.serverManager.ListLoadedServers.has(server)) && !server.isServerActive()) {
                 this.serverManager.RecordServers.delete(name);
             }
 
@@ -1393,7 +1407,7 @@ class Main {
         for (const serverName of this.autoStarts) {
             const allServers = this.serverManager.findServers(serverName);
             for (const server of allServers) {
-                if (server.isRunning()) {
+                if (server.isInstanceRunning()) {
                     this.logger.warn("自动启动服务器失败：服务器已在运行：", server.name);
                     continue;
                 }
@@ -1500,7 +1514,7 @@ class Main {
             this.logger.error("服务器 %s 未配置 stdin 为 use，无法发送命令", server.name);
             return false;
         }
-        if (!server.isRunning()) {
+        if (!server.isInstanceRunning()) {
             this.logger.error("服务器 %s 未运行，无法发送命令", serverName);
             return false;
         }
@@ -1615,6 +1629,9 @@ class Lock {
         return unlock;
     }
     #isLocked = false;
+    get isLocked() {
+        return this.#isLocked;
+    }
     #handles: (() => void)[] = [];
 }
 

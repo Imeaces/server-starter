@@ -7,7 +7,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
 import { EOL } from "node:os";
-import { EventEmitter } from "node:stream";
+import { EventEmitter } from "node:events";
 
 process.on("exit", () => {
     DEBUG.debug("ServerInstance", ServerInstance);

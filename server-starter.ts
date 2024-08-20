@@ -1275,9 +1275,13 @@ class Main {
         await this.startAutoStartsServers();
         this.logger.info("程序已启动");
     }
+    #isStopping = false;
     async stopScript() {
+        if (this.#isStopping) return;
+        this.#isStopping = true;
         this.logger.info("正在结束运行");
         this.#readline.close();
+        this.ListSchedules.forEach(schedule => schedule.stop());
         this.logger.info("关闭服务器中")
         await this.serverManager.stopAllServer();
         for (const serverInstance of ServerInstance.RecordServerRunning.values()) {

@@ -34,5 +34,3 @@ tar -zcf ../server-starter-linux-x64.tar.gz server-starter/ node-v21.1.0-linux-x
 cd ..
 
 rm -rf .tmp
-
-

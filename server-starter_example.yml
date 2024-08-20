@@ -1,35 +1,57 @@
 schedules:
-- cron: "* * * * *"
-  action: cmd
-  value: echo 正在运行一个计划任务
-# - cron: "0 0 * * *"
-#   action: server-stop
-#   server: server1
-# - cron: "30 13 * * *"
-#   action: server-restart
-#   server: server1
-# - cron: "0 6 * * *"
-#   action: server-start
-#   server: server1
-# - cron: "0 4 * * 4"
-#   action: multi
-#   value:
-#   - action: stop-all-server
-#   - action: cmd
-#     value: bash ./scripts/backup.sh
-#   - action: start-auto-starts-server
+  - cron: "* * * * *"
+    action: cmd
+    value: echo 正在运行一个计划任务
+#   - cron: "0 0 * * *"
+#     action: server-stop
+#     server: server1
+#   - cron: "30 13 * * *"
+#     action: server-restart
+#     server: server1
+#   - cron: "0 6 * * *"
+#     action: server-start
+#     server: server1
+#   - cron: "0 4 * * 4"
+#     action: multi
+#     value:
+#       - action: server-command
+#         server: server1
+#         value: "say 将会关闭服务器以创建备份"
+#       - action: wait
+#         # 单位：毫秒
+#         value: 60000
+#       - action: stop-all-server
+#       - action: cmd
+#         # 你需要自行编写备份逻辑
+#         value: |
+#            bash -c 'mkdir backup/ && tar -zcf backup/$(date +%Y-%m-%d_%H:%M:%S).tar.gz server1/ mariadb/data/'
+#       - action: start-auto-starts-server
+#       - action: wait
+#         # 单位：毫秒
+#         value: 120000
+#       - action: server-command
+#         server: server1
+#         value: "say 服务器已完成备份"
 servers:
    shell:
       isMultiple: true
       params: [bash]
+   # mariadb:
+   #    params: [./start-mariadb.sh ./mariadb_data]
    # server1:
    #    exec-option: { shell: true }
    #    params: java -jar server.jar
+   #    stopCommands: 
+   #      - type: cmd
+   #        value: stop
+   #        timeoutMs: 60000
 autoStarts: 
 - shell
 #- server1
+#- mariadb
 
 autoRestarts:
-- server1
+#- server1
+#- mariadb
 
 defaultCommandOutputServer: shell

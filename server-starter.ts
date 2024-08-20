@@ -1480,7 +1480,7 @@ class Main {
         } else if (action.action === "server-kill") {
             await this.serverManager.sendSignalToServer(action.server, action.value, action.serverIndex);
         } else if (action.action === "server-command") {
-            await this.sendServerCommand(action.server, action.server, action.serverIndex);
+            await this.sendServerCommand(action.server, action.value, action.serverIndex);
         } else if (action.action === "stop-all-server") {
             await this.serverManager.stopAllServer();
         } else if (action.action === "start-auto-starts-server") {

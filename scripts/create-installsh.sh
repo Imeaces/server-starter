@@ -10,10 +10,11 @@ set -e
 if [ "$1" != install ]; then
    cp -f "$0" .tmp_install.sh
    sh .tmp_install.sh install
+   rm .tmp_install.sh
    exit
 fi
 
-lines=25
+lines=26
 
 exec 4<./.tmp_install.sh
 

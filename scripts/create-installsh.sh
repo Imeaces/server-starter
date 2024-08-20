@@ -14,7 +14,7 @@ if [ "$1" != install ]; then
    exit
 fi
 
-lines=26
+lines=27
 
 exec 4<./.tmp_install.sh
 
@@ -28,6 +28,7 @@ while true; do
 done <&4
 
 tar -zxf - <&4
+chmod +x start.sh
 exit
 EOM
 

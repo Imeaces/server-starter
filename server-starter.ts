@@ -1270,7 +1270,7 @@ class Main {
             output: process.stderr,
         });
         this.#readline.on("line", this.nextCommand.bind(this));
-
+        this.#readline.on("close", this.stopScript.bind(this));
         await this.reload(configFile);
         await this.startAutoStartsServers();
         this.logger.info("程序已启动");

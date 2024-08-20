@@ -1,6 +1,7 @@
 *.js
-*.yml
 .vscode/
+/server-starter-install.sh
+/server-starter.yml
 
 # Logs
 logs

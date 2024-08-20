@@ -1,0 +1,35 @@
+schedules:
+- cron: "* * * * *"
+  action: cmd
+  value: echo 正在运行一个计划任务
+# - cron: "0 0 * * *"
+#   action: server-stop
+#   server: server1
+# - cron: "30 13 * * *"
+#   action: server-restart
+#   server: server1
+# - cron: "0 6 * * *"
+#   action: server-start
+#   server: server1
+# - cron: "0 4 * * 4"
+#   action: multi
+#   value:
+#   - action: stop-all-server
+#   - action: cmd
+#     value: bash ./scripts/backup.sh
+#   - action: start-auto-starts-server
+servers:
+   shell:
+      isMultiple: true
+      params: [bash]
+   # server1:
+   #    exec-option: { shell: true }
+   #    params: java -jar server.jar
+autoStarts: 
+- shell
+#- server1
+
+autoRestarts:
+- server1
+
+defaultCommandOutputServer: shell

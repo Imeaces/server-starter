@@ -115,7 +115,7 @@ type ServerConfigID = ID;
  */
 type ServerRunID = ID;
 
-type StarterSchedule = { cron: string } & StarterAction;
+type StarterSchedule = { enabled?: boolean, cron: string } & StarterAction;
 type StarterAction = { action: string, value?: any } & (
     StarterStopAllServerAction
     | StarterSignalServerAction
@@ -236,9 +236,12 @@ async function readConfigFile(file: string = configFile): Promise<ServerStarterC
             throw "schedules must be array";
         }
         schedules?.forEach((schedule, index) => {
-            const { cron, action, value } = schedule;
+            const { enabled, cron, action, value } = schedule;
             if (typeof cron !== "string") {
                 throw `schedules[${index}].cron is not string`;
+            }
+            if (enabled != undefined && typeof enabled !== "boolean") {
+                throw `schedules[${index}].enabled is not boolean`;
             }
             if (typeof action !== "string") {
                 throw `schedules[${index}].action is not string`;
@@ -1425,6 +1428,9 @@ class Main {
         }
     }
     async runSchedule(task: StarterSchedule) {
+        if (task.enabled === false){
+            return;
+        }
         this.logger.debug("正在运行任务：%s", JSON.stringify(task));
         try {
             await this.#execAction(task);

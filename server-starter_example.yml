@@ -6,6 +6,7 @@ schedules:
 #     action: server-stop
 #     server: server1
 #   - cron: "30 13 * * *"
+#     enabled: false
 #     action: server-restart
 #     server: server1
 #   - cron: "0 6 * * *"

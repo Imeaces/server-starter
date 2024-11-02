@@ -1238,19 +1238,25 @@ class Main {
             }
         }
     }
-    setOutput(serverName: string, chooseFirst: boolean = false) {
-        const servers = this.serverManager.findServers(serverName);
+    setOutput(serverName: string, chooseFirst: boolean = false): boolean {
+        const servers = this.serverManager.findServers(serverName, true);
         if (servers.length !== 1 && !chooseFirst) {
             this.logger.error("服务器 %s 有 %d 个实例，无法确定要发送命令的服务器", serverName, servers.length);
-            return;
-        }
-        const server = servers[0];
-        if (server.config.instanceConfig.stdin !== "use") {
-            this.logger.error("服务器 %s 未配置 stdin 为 use，无法发送命令", server.name);
             return false;
         }
-        this.commandOutput = server.name;
-        this.logger.info("已将命令输出切换到服务器 %s", server.name);
+
+        const server = servers[0];
+        if (server == undefined) {
+            this.logger.error("未能找到以下服务器： %s", serverName);
+            return false;
+        } else if (server.config.instanceConfig.stdin !== "use") {
+            this.logger.error("服务器 %s 未配置 stdin 为 use，无法发送命令", server.name);
+            return false;
+        } else {
+            this.commandOutput = server.name;
+            this.logger.info("已将命令输出切换到服务器 %s", server.name);
+            return true;
+        }
     }
     isOutputAvailable(output = this.commandOutput): boolean {
         if (output == null) {

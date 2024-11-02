@@ -56,3 +56,8 @@ autoRestarts:
 #- mariadb
 
 defaultCommandOutputServer: shell
+
+# 需要重启以加载以下配置
+debugMode: false
+stopCommand: stop
+catchUnexceptedErrors: false

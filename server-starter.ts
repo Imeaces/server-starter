@@ -200,6 +200,8 @@ type ServerStarterConfig = {
     shell?: string | string[]
     commands?: Record<string, StarterAction>
     defaultCommandOutputServer?: string
+    stopCommand?: string
+    catchUnexpectedErrors?: boolean
 };
 
 async function readConfigFile(file: string = configFile): Promise<ServerStarterConfig | null> {
@@ -936,9 +938,6 @@ const Commands: Record<string, (this: Main, args: string[], raw: string) => void
         DEBUG.info("即将向服务器 %s 发送命令：%s", serverName, commandClean);
         this.sendServerCommand(serverName, commandClean);
     },
-    "stop": function() {
-        this.stopScript();
-    },
     "+restart": function(args, raw) {
         this.execAction({
             action: "server-restart",
@@ -947,6 +946,9 @@ const Commands: Record<string, (this: Main, args: string[], raw: string) => void
     },
     "+reload": function(){
         this.reload();
+    },
+    "+stopScript": function () {
+        this.stopScript();
     },
     "+output": function(args, raw) {
         const output = args[0];
@@ -1202,6 +1204,7 @@ class Main {
     ListSchedules = new Set<ScheduledTask>();
     commandOutput: string | null = null;
     defaultCommandOutput: string | null = null;
+    stopCommand: string = "stop";
     constructor() {
         this.serverManager = new ServerManager(this);
     }
@@ -1272,6 +1275,25 @@ class Main {
         }
         return server.isInstanceRunning();
     }
+    catchUnexceptedErrors = false;
+    onUncaughtException(err: Error) {
+        this.logger.error("出现未知错误：", err);
+        if (this.#isStopping) {
+            this.logger.warn("忽略此错误，因为程序正在关闭")
+        } else {
+            this.logger.warn("将会关闭所有服务器以降低风险");
+            this.serverManager.stopAllServer();
+        }
+    }
+    onUnhandledRejection(reason: unknown) {
+        this.logger.error("未处理的拒绝：", reason);
+        if (this.#isStopping) {
+            this.logger.warn("忽略此错误，因为程序正在关闭")
+        } else {
+            this.logger.warn("将会关闭所有服务器以降低风险");
+            this.serverManager.stopAllServer();
+        }
+    }
     async startScript() {
         this.logger.info("启动程序中");
         this.#readline = readline.createInterface({
@@ -1283,6 +1305,11 @@ class Main {
         this.#readline.on("SIGINT", this.stopScript.bind(this));
         this.#readline.on("SIGTSTP", this.stopScript.bind(this));
         await this.reload(configFile);
+        if (this.catchUnexceptedErrors) {
+            process.on("uncaughtException", this.onUncaughtException.bind(this));
+            process.on("unhandledRejection", this.onUnhandledRejection.bind(this));
+        }
+        Commands[this.stopCommand] = this.stopScript;
         await this.startAutoStartsServers();
         this.logger.info("程序已启动");
     }
@@ -1333,6 +1360,10 @@ class Main {
         }
         const result = { serverCount: 0, scheduleCount: 0 };
         DEBUG.debug("current config:", starterConfig);
+
+        if (starterConfig.stopCommand != undefined) {
+            this.stopCommand = starterConfig.stopCommand;
+        }
 
         // load servers to config object
         for (const iname in starterConfig.servers) {
